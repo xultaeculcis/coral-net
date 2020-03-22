@@ -271,3 +271,6 @@ fabric.properties
 .idea/caches/build_file_checksums.ser
 
 datasets/
+logs/
+images/
+*.h5
