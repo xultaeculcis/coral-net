@@ -239,3 +239,4 @@ fabric.properties
 logs/
 images/
 *.h5
+datasets/
