@@ -14,11 +14,11 @@ class SEResnext50_32x4d(nn.Module):
         if pretrained is not None:
             self.base_model.load_state_dict(
                 torch.load(
-                    "../input/pretrained-model-weights-pytorch/se_resnext50_32x4d-a260b3a4.pth"
+                    "../input/pretrained_model_weights/se_resnext50_32x4d-a260b3a4.pth"
                 )
             )
 
-        self.l0 = nn.Linear(2048, 1)
+        self.l0 = nn.Linear(2048, 7)
 
     def forward(self, image, targets):
         batch_size, _, _, _ = image.shape
@@ -27,6 +27,6 @@ class SEResnext50_32x4d(nn.Module):
         x = F.adaptive_avg_pool2d(x, 1).reshape(batch_size, -1)
 
         out = self.l0(x)
-        loss = nn.BCEWithLogitsLoss()(out, targets.view(-1, 1).type_as(x))
+        loss = nn.CrossEntropyLoss()(out, targets)
 
         return out, loss

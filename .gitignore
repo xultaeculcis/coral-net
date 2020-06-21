@@ -240,3 +240,5 @@ logs/
 images/
 *.h5
 datasets/
+*.bin
+*.pth
