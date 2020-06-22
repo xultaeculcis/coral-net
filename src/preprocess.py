@@ -35,6 +35,10 @@ def build_data_frame(image_dict):
                 "label": i,
                 "text_label": cls
             }
+
+            for idx, c in enumerate(CLASS_NAMES):
+                df_data[c] = 1 if idx == i else 0
+
             df_lst.append(df_data)
 
         tmp_df = pd.DataFrame(df_lst)
