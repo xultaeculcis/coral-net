@@ -39,7 +39,7 @@ def predict_on_cv_fold(fold):
     )
 
     test_loader = torch.utils.data.DataLoader(
-        test_dataset, batch_size=32, shuffle=False, num_workers=8
+        test_dataset, batch_size=128, shuffle=False, num_workers=8
     )
 
     return predict(fold, test_loader)
