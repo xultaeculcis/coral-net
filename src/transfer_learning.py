@@ -20,30 +20,35 @@ Note:
 """
 
 import argparse
+import os
 from collections import OrderedDict
 from pathlib import Path
 from pprint import pprint
-from tempfile import TemporaryDirectory
-from typing import Optional, Generator, Union
+from typing import Optional, Generator
 
+import albumentations
+import numpy as np
+import pandas as pd
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
-from pytorch_lightning import _logger as log
+from PIL import Image
+from PIL import ImageFile
+from pandas import DataFrame
+from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
+from sklearn import model_selection
 from torch import optim
 from torch.nn import Module
 from torch.optim.lr_scheduler import MultiStepLR
 from torch.optim.optimizer import Optimizer
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import models
-from torchvision import transforms
-from torchvision.datasets import ImageFolder
-from torchvision.datasets.utils import download_and_extract_archive
 
 BN_TYPES = (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)
-DATA_URL = 'https://storage.googleapis.com/mledu-datasets/cats_and_dogs_filtered.zip'
-SEED = 42
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+SEED = 42  # Answer to the Ultimate Question of Life, the Universe, and Everything
 
 
 #  --- Utility functions ---
@@ -144,6 +149,78 @@ def _unfreeze_and_add_param_group(module: Module,
     })
 
 
+def k_fold(df: DataFrame, k: int = 5):
+    print(f"Creating folds. k = {k}")
+    df["kfold"] = -1
+    new_frame = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
+    y = new_frame.label.values
+    kf = model_selection.StratifiedKFold(n_splits=k, shuffle=True, random_state=SEED)
+
+    for f, (t_, v_) in enumerate(kf.split(X=new_frame, y=y)):
+        new_frame.loc[v_, 'kfold'] = f
+
+    print(f"Created {k} folds for the cross validation")
+
+    return new_frame
+
+
+#  --- Dataset ----
+class CoralFragDataset(Dataset):
+    def __init__(self,
+                 image_names: list,
+                 targets: list,
+                 root_dir: str = "./",
+                 train: bool = True,
+                 resize=None,
+                 augmentations=None):
+        self.image_names = image_names
+        self.targets = targets
+
+        print("DATASET")
+        print(image_names[0])
+        print(targets[0])
+
+        self.root_dir = root_dir
+        self.train = train
+        self.resize = resize
+        self.augmentations = augmentations
+        self.classes = [
+            "Acanthastrea",
+            "Chalice",
+            "Euphyllia",
+            "Other",
+            "Acropora",
+            "Montipora",
+            "Zoa"
+        ]
+        self.class_lookup_by_name = dict([(c, i) for i, c in enumerate(self.classes)])
+        self.class_lookup_by_index = dict([(i, c) for i, c in enumerate(self.classes)])
+
+    def __len__(self):
+        return len(self.image_names)
+
+    def __getitem__(self, idx):
+        image_name = self.image_names[idx]
+        image_path = os.path.join(self.root_dir, "train" if self.train else "test", image_name)
+        image = Image.open(image_path)
+        targets = self.targets[idx]
+
+        if self.resize is not None:
+            image = image.resize(
+                (self.resize[1], self.resize[0]), resample=Image.BILINEAR
+            )
+
+        image = np.array(image)
+
+        if self.augmentations is not None:
+            augmented = self.augmentations(image=image)
+            image = augmented["image"]
+
+        image = np.transpose(image, (2, 0, 1)).astype(np.float32)
+
+        return torch.tensor(image, dtype=torch.float), torch.tensor(targets, dtype=torch.long)
+
+
 #  --- Pytorch-lightning module ---
 class TransferLearningModel(pl.LightningModule):
     """Transfer Learning with pre-trained Model.
@@ -153,13 +230,13 @@ class TransferLearningModel(pl.LightningModule):
     """
 
     def __init__(self,
-                 dl_path: Union[str, Path],
                  backbone: str = 'resnet18',
                  train_bn: bool = True,
                  milestones: tuple = (5, 10),
                  batch_size: int = 16,
                  lr: float = 1e-3,
                  lr_scheduler_gamma: float = 1e-1,
+                 n_classes: int = 1,
                  num_workers: int = 8, **kwargs) -> None:
         super().__init__()
 
@@ -170,18 +247,17 @@ class TransferLearningModel(pl.LightningModule):
 
         if backbone not in self.supported_architectures:
             raise Exception(f"The '{backbone}' is currently not supported as a backbone. "
-                            f"Supported networks are: {self.supported_architectures}")
+                            f"Supported architectures are: {self.supported_architectures}")
 
-        self.dl_path = dl_path
         self.backbone = backbone
         self.train_bn = train_bn
         self.milestones = milestones
         self.batch_size = batch_size
         self.lr = lr
         self.lr_scheduler_gamma = lr_scheduler_gamma
+        self.n_classes = n_classes
         self.num_workers = num_workers
 
-        self.dl_path = dl_path
         self.__build_model()
 
     def __build_model(self):
@@ -203,15 +279,14 @@ class TransferLearningModel(pl.LightningModule):
                       torch.nn.Linear(256, 32),
                       torch.nn.ReLU(),
                       torch.nn.Dropout(),
-                      torch.nn.Linear(32, 1)]
+                      torch.nn.Linear(32, self.n_classes)]
         self.fc = torch.nn.Sequential(*_fc_layers)
 
         # 3. Loss:
-        self.loss_func = F.binary_cross_entropy_with_logits
+        self.loss_func = F.binary_cross_entropy_with_logits if self.n_classes == 1 else F.cross_entropy
 
     def forward(self, x):
         """Forward pass. Returns logits."""
-
         # 1. Feature extraction:
         x = self.feature_extractor(x)
         x = x.squeeze(-1).squeeze(-1)
@@ -305,9 +380,15 @@ class TransferLearningModel(pl.LightningModule):
         val_acc_mean = torch.stack([output['num_correct']
                                     for output in outputs]).sum().float()
         val_acc_mean /= (len(outputs) * self.batch_size)
-        return {'log': {'val_loss': val_loss_mean,
-                        'val_acc': val_acc_mean,
-                        'step': self.current_epoch}}
+        return {
+            'val_loss': val_loss_mean,
+            'val_accuracy': val_acc_mean,
+            'log': {
+                'val_loss': val_loss_mean,
+                'val_acc': val_acc_mean,
+                'step': self.current_epoch
+            }
+        }
 
     def configure_optimizers(self):
         optimizer = optim.Adam(filter(lambda p: p.requires_grad,
@@ -319,56 +400,6 @@ class TransferLearningModel(pl.LightningModule):
                                 gamma=self.lr_scheduler_gamma)
 
         return [optimizer], [scheduler]
-
-    def prepare_data(self):
-        """Download images and prepare images datasets."""
-        download_and_extract_archive(url=DATA_URL,
-                                     download_root=self.dl_path,
-                                     remove_finished=True)
-
-    def setup(self, stage: str):
-        data_path = Path(self.dl_path).joinpath('cats_and_dogs_filtered')
-
-        # 2. Load the data + preprocessing & data augmentation
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-
-        train_dataset = ImageFolder(root=data_path.joinpath('train'),
-                                    transform=transforms.Compose([
-                                        transforms.Resize(self.input_size),
-                                        transforms.RandomHorizontalFlip(),
-                                        transforms.ToTensor(),
-                                        normalize,
-                                    ]))
-
-        valid_dataset = ImageFolder(root=data_path.joinpath('validation'),
-                                    transform=transforms.Compose([
-                                        transforms.Resize(self.input_size),
-                                        transforms.ToTensor(),
-                                        normalize,
-                                    ]))
-
-        self.train_dataset = train_dataset
-        self.valid_dataset = valid_dataset
-
-    def __dataloader(self, train):
-        """Train/validation loaders."""
-
-        _dataset = self.train_dataset if train else self.valid_dataset
-        loader = DataLoader(dataset=_dataset,
-                            batch_size=self.batch_size,
-                            num_workers=self.num_workers,
-                            shuffle=True if train else False)
-
-        return loader
-
-    def train_dataloader(self):
-        log.info('Training data loaded.')
-        return self.__dataloader(train=True)
-
-    def val_dataloader(self):
-        log.info('Validation data loaded.')
-        return self.__dataloader(train=False)
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -413,6 +444,17 @@ class TransferLearningModel(pl.LightningModule):
                             metavar='W',
                             help='number of CPU workers',
                             dest='num_workers')
+        parser.add_argument('--num-classes',
+                            default=1,
+                            type=int,
+                            help='number of classes to classify',
+                            dest='n_classes')
+        parser.add_argument('--folds',
+                            default=5,
+                            type=int,
+                            metavar='F',
+                            help='number of folds in k-Fold Cross Validation',
+                            dest='folds')
         parser.add_argument('--train-bn',
                             default=True,
                             type=bool,
@@ -424,6 +466,16 @@ class TransferLearningModel(pl.LightningModule):
                             type=list,
                             metavar='M',
                             help='List of two epochs milestones')
+        parser.add_argument('--train-csv',
+                            default="../datasets/train.csv",
+                            type=str,
+                            help='Path to train csv file',
+                            dest='train_csv')
+        parser.add_argument('--test-csv',
+                            default="../datasets/test.csv",
+                            type=str,
+                            help='Path to test csv file',
+                            dest='test_csv')
         return parser
 
 
@@ -441,11 +493,71 @@ def main(args: argparse.Namespace) -> None:
     print("Using following configuration: ")
     pprint(args)
 
-    with TemporaryDirectory(dir=args.root_data_path) as tmp_dir:
-        model = TransferLearningModel(dl_path=tmp_dir, **vars(args))
-        logger = TensorBoardLogger(
-            "logs",
-            name=f"{args.backbone}"
+    resize_to = [224, 224] if args.backbone != 'googlenet' else [112, 112]
+
+    df = pd.read_csv(args.train_csv)
+    df = k_fold(df, args.folds)
+
+    # imagenet normalization
+    mean = (0.485, 0.456, 0.406)
+    std = (0.229, 0.224, 0.225)
+
+    train_aug = albumentations.Compose(
+        [
+            albumentations.Normalize(mean, std, max_pixel_value=255.0, always_apply=True),
+            albumentations.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15),
+            albumentations.Flip(p=0.5)
+        ]
+    )
+    valid_aug = albumentations.Compose(
+        [
+            albumentations.Normalize(mean, std, max_pixel_value=255.0, always_apply=True)
+        ]
+    )
+
+    for fold in range(1):
+        df_train = df[df.kfold != fold].reset_index(drop=True)
+        df_valid = df[df.kfold == fold].reset_index(drop=True)
+
+        train_image_names = df_train.image
+        val_image_names = df_valid.image
+
+        train_targets = df_train.label
+        val_targets = df_valid.label
+
+        train_dataset = CoralFragDataset(image_names=train_image_names,
+                                         targets=train_targets,
+                                         root_dir="../datasets",
+                                         train=True,
+                                         resize=resize_to,
+                                         augmentations=train_aug)
+
+        val_dataset = CoralFragDataset(image_names=val_image_names,
+                                       targets=val_targets,
+                                       root_dir="../datasets",
+                                       train=True,
+                                       resize=resize_to,
+                                       augmentations=valid_aug)
+
+        train_loader = DataLoader(dataset=train_dataset,
+                                  batch_size=args.batch_size,
+                                  shuffle=True,
+                                  num_workers=args.num_workers)
+
+        val_loader = torch.utils.data.DataLoader(dataset=val_dataset,
+                                                 batch_size=args.batch_size,
+                                                 shuffle=False,
+                                                 num_workers=args.num_workers)
+
+        print(f"Fold {fold}: Training is starting...")
+        model = TransferLearningModel(**vars(args))
+        logger = TensorBoardLogger("logs", name=f"{args.backbone}")
+        early_stop_callback = EarlyStopping(
+            monitor='val_accuracy',
+            min_delta=0.00,
+            patience=5,
+            verbose=True,
+            mode='max'
         )
         trainer = pl.Trainer(
             weights_summary=None,
@@ -454,9 +566,18 @@ def main(args: argparse.Namespace) -> None:
             min_epochs=args.nb_epochs,
             max_epochs=args.nb_epochs,
             logger=logger,
+            deterministic=True,
+            benchmark=False,
+            early_stop_callback=early_stop_callback,
         )
 
-        trainer.fit(model)
+        # dataiter = iter(train_loader)
+        # images, labels = dataiter.next()
+        #
+        # print(images[0], labels[0])
+
+        trainer.fit(model, train_dataloader=train_loader, val_dataloaders=val_loader)
+        print(f"Fold {fold}: Training is DONE... Training on fold {fold} yielded following results:")
 
 
 def get_args() -> argparse.Namespace:
@@ -472,9 +593,7 @@ def get_args() -> argparse.Namespace:
 
 
 if __name__ == '__main__':
-    pl.utilities.seed.seed_everything(seed=SEED)
+    pl.seed_everything(seed=SEED)
     torch.manual_seed(SEED)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
     main(get_args())
