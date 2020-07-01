@@ -22,11 +22,11 @@ Note:
 import argparse
 import os
 from collections import OrderedDict
-from pathlib import Path
 from pprint import pprint
 from typing import Optional, Generator
 
 import albumentations
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
@@ -185,13 +185,13 @@ class CoralFragDataset(Dataset):
         self.resize = resize
         self.augmentations = augmentations
         self.classes = [
-            "Acanthastrea",
-            "Chalice",
-            "Euphyllia",
+            "Montipora",
             "Other",
             "Acropora",
-            "Montipora",
-            "Zoa"
+            "Zoa",
+            "Euphyllia",
+            "Chalice",
+            "Acanthastrea"
         ]
         self.class_lookup_by_name = dict([(c, i) for i, c in enumerate(self.classes)])
         self.class_lookup_by_index = dict([(i, c) for i, c in enumerate(self.classes)])
@@ -217,8 +217,45 @@ class CoralFragDataset(Dataset):
             image = augmented["image"]
 
         image = np.transpose(image, (2, 0, 1)).astype(np.float32)
+        img_tensor = torch.tensor(image, dtype=torch.float)
+        target_tensor = torch.tensor(targets, dtype=torch.long)
 
-        return torch.tensor(image, dtype=torch.float), torch.tensor(targets, dtype=torch.long)
+        return img_tensor, target_tensor
+
+    def as_pillow(self, idx):
+        image_name = self.image_names[idx]
+        image_path = os.path.join(self.root_dir, "train" if self.train else "test", image_name)
+        image = Image.open(image_path)
+        targets = self.targets[idx]
+        return image, self.class_lookup_by_index[targets]
+
+    def plot_sample_batch(self):
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(8, 4, figsize=(12, 20))
+        t = np.random.randint(0, self.__len__())
+        for i in range(8):
+            for j in range(4):
+                img, target = self.as_pillow(t)
+                ax[i, j].set_title(target)
+                ax[i, j].imshow(img)
+                t += 1
+
+        plt.show()
+
+
+def plot_single_batch(loader: DataLoader, dataset: CoralFragDataset) -> None:
+    batch = next(iter(loader))
+    fig, ax = plt.subplots(8, 4, figsize=(12, 20))
+    idx = 0
+    for i in range(8):
+        for j in range(4):
+            image = batch[0][idx].permute(1, 2, 0)
+            target = batch[1][idx].item()
+            ax[i, j].set_title(dataset.class_lookup_by_index[target])
+            ax[i, j].imshow(image)
+            idx += 1
+
+    plt.show()
 
 
 #  --- Pytorch-lightning module ---
@@ -236,7 +273,7 @@ class TransferLearningModel(pl.LightningModule):
                  batch_size: int = 16,
                  lr: float = 1e-3,
                  lr_scheduler_gamma: float = 1e-1,
-                 n_classes: int = 1,
+                 n_classes: int = 7,
                  num_workers: int = 8, **kwargs) -> None:
         super().__init__()
 
@@ -314,19 +351,6 @@ class TransferLearningModel(pl.LightningModule):
                    n=-2,
                    train_bn=self.train_bn)
 
-    def __step(self, batch):
-        # 1. Forward pass:
-        x, y = batch
-        y_logits = self.forward(x)
-        y_true = y.view((-1, 1)).type_as(x)
-        y_bin = torch.ge(y_logits, 0)
-
-        # 2. Compute loss & accuracy:
-        loss = self.loss(y_logits, y_true)
-        num_correct = torch.eq(y_bin.view(-1), y_true.view(-1)).sum()
-
-        return loss, num_correct
-
     def on_epoch_start(self):
         """Use `on_epoch_start` to unfreeze layers progressively."""
         optimizer = self.trainer.optimizers[0]
@@ -342,13 +366,21 @@ class TransferLearningModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         # 1. Forward pass:
-        train_loss, num_correct = self.__step(batch)
+        x, y_true = batch
+        y_logits = self.forward(x)
+
+        # 2. Compute loss & accuracy:
+        train_loss = self.loss(y_logits, y_true)
+
+        with torch.no_grad():
+            train_acc = (torch.argmax(y_logits, dim=1) == y_true).float().mean()
 
         # 3. Outputs:
         output = OrderedDict({'loss': train_loss,
-                              'num_correct': num_correct,
+                              'train_acc': train_acc,
                               'log': {
-                                  'training_loss': train_loss
+                                  'training_loss': train_loss,
+                                  'training_acc': train_acc,
                               }})
 
         return output
@@ -358,7 +390,7 @@ class TransferLearningModel(pl.LightningModule):
 
         train_loss_mean = torch.stack([output['loss']
                                        for output in outputs]).mean()
-        train_acc_mean = torch.stack([output['num_correct']
+        train_acc_mean = torch.stack([output['train_acc']
                                       for output in outputs]).sum().float()
         train_acc_mean /= (len(outputs) * self.batch_size)
         return {'log': {'train_loss': train_loss_mean,
@@ -367,22 +399,28 @@ class TransferLearningModel(pl.LightningModule):
                         'step': self.current_epoch}}
 
     def validation_step(self, batch, batch_idx):
-        val_loss, num_correct = self.__step(batch)
+        # 1. Forward pass:
+        x, y_true = batch
+        y_logits = self.forward(x)
+
+        # 2. Compute loss & accuracy:
+        val_loss = self.loss(y_logits, y_true)
+
+        with torch.no_grad():
+            val_acc = (torch.argmax(y_logits, dim=1) == y_true).float().mean()
 
         return {'val_loss': val_loss,
-                'num_correct': num_correct}
+                'val_acc': val_acc}
 
     def validation_epoch_end(self, outputs):
         """Compute and log validation loss and accuracy at the epoch level."""
 
         val_loss_mean = torch.stack([output['val_loss']
                                      for output in outputs]).mean()
-        val_acc_mean = torch.stack([output['num_correct']
+        val_acc_mean = torch.stack([output['val_acc']
                                     for output in outputs]).sum().float()
         val_acc_mean /= (len(outputs) * self.batch_size)
         return {
-            'val_loss': val_loss_mean,
-            'val_accuracy': val_acc_mean,
             'log': {
                 'val_loss': val_loss_mean,
                 'val_acc': val_acc_mean,
@@ -410,7 +448,7 @@ class TransferLearningModel(pl.LightningModule):
                             metavar='BK',
                             help='Name (as in ``torchvision.models``) of the feature extractor')
         parser.add_argument('--epochs',
-                            default=15,
+                            default=20,
                             type=int,
                             metavar='N',
                             help='total number of epochs',
@@ -445,7 +483,7 @@ class TransferLearningModel(pl.LightningModule):
                             help='number of CPU workers',
                             dest='num_workers')
         parser.add_argument('--num-classes',
-                            default=1,
+                            default=7,
                             type=int,
                             help='number of classes to classify',
                             dest='n_classes')
@@ -516,8 +554,8 @@ def main(args: argparse.Namespace) -> None:
     )
 
     for fold in range(1):
-        df_train = df[df.kfold != fold].reset_index(drop=True)
-        df_valid = df[df.kfold == fold].reset_index(drop=True)
+        df_train = df[df["kfold"] != fold].reset_index(drop=True)
+        df_valid = df[df["kfold"] == fold].reset_index(drop=True)
 
         train_image_names = df_train.image
         val_image_names = df_valid.image
@@ -527,14 +565,14 @@ def main(args: argparse.Namespace) -> None:
 
         train_dataset = CoralFragDataset(image_names=train_image_names,
                                          targets=train_targets,
-                                         root_dir="../datasets",
+                                         root_dir=args.root_data_path,
                                          train=True,
                                          resize=resize_to,
                                          augmentations=train_aug)
 
         val_dataset = CoralFragDataset(image_names=val_image_names,
                                        targets=val_targets,
-                                       root_dir="../datasets",
+                                       root_dir=args.root_data_path,
                                        train=True,
                                        resize=resize_to,
                                        augmentations=valid_aug)
@@ -551,9 +589,9 @@ def main(args: argparse.Namespace) -> None:
 
         print(f"Fold {fold}: Training is starting...")
         model = TransferLearningModel(**vars(args))
-        logger = TensorBoardLogger("logs", name=f"{args.backbone}")
+        logger = TensorBoardLogger("logs", name=f"{args.backbone}-fold-{fold}")
         early_stop_callback = EarlyStopping(
-            monitor='val_accuracy',
+            monitor='val_loss',
             min_delta=0.00,
             patience=5,
             verbose=True,
@@ -569,12 +607,8 @@ def main(args: argparse.Namespace) -> None:
             deterministic=True,
             benchmark=False,
             early_stop_callback=early_stop_callback,
+            # fast_dev_run=True
         )
-
-        # dataiter = iter(train_loader)
-        # images, labels = dataiter.next()
-        #
-        # print(images[0], labels[0])
 
         trainer.fit(model, train_dataloader=train_loader, val_dataloaders=val_loader)
         print(f"Fold {fold}: Training is DONE... Training on fold {fold} yielded following results:")
@@ -585,7 +619,7 @@ def get_args() -> argparse.Namespace:
     parent_parser.add_argument('--root-data-path',
                                metavar='DIR',
                                type=str,
-                               default=Path.cwd().as_posix(),
+                               default="../datasets",
                                help='Root directory where to download the data',
                                dest='root_data_path')
     parser = TransferLearningModel.add_model_specific_args(parent_parser)
