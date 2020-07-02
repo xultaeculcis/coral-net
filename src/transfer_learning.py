@@ -47,7 +47,10 @@ from torchvision import models
 
 BN_TYPES = (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
-
+# imagenet normalization
+mean = (0.485, 0.456, 0.406)
+std = (0.229, 0.224, 0.225)
+# reproducibility
 SEED = 42  # Answer to the Ultimate Question of Life, the Universe, and Everything
 
 
@@ -175,11 +178,6 @@ class CoralFragDataset(Dataset):
                  augmentations=None):
         self.image_names = image_names
         self.targets = targets
-
-        print("DATASET")
-        print(image_names[0])
-        print(targets[0])
-
         self.root_dir = root_dir
         self.train = train
         self.resize = resize
@@ -364,23 +362,32 @@ class TransferLearningModel(pl.LightningModule):
                                           optimizer=optimizer,
                                           train_bn=self.train_bn)
 
-    def training_step(self, batch, batch_idx):
+    def __step(self, batch):
         # 1. Forward pass:
         x, y_true = batch
         y_logits = self.forward(x)
 
         # 2. Compute loss & accuracy:
-        train_loss = self.loss(y_logits, y_true)
+        loss = self.loss(y_logits, y_true)
 
         with torch.no_grad():
-            train_acc = (torch.argmax(y_logits, dim=1) == y_true).float().mean()
+            y_hat = torch.argmax(y_logits, dim=1)
+            same = y_hat == y_true
+            num_correct = same.int().sum()
+            acc = same.float().mean()
 
-        # 3. Outputs:
+        return loss, acc, num_correct
+
+    def training_step(self, batch, batch_idx):
+        train_loss, train_acc, num_correct = self.__step(batch)
+
         output = OrderedDict({'loss': train_loss,
+                              'num_correct': num_correct,
                               'train_acc': train_acc,
                               'log': {
                                   'training_loss': train_loss,
                                   'training_acc': train_acc,
+                                  'num_correct': num_correct
                               }})
 
         return output
@@ -388,39 +395,44 @@ class TransferLearningModel(pl.LightningModule):
     def training_epoch_end(self, outputs):
         """Compute and log training loss and accuracy at the epoch level."""
 
-        train_loss_mean = torch.stack([output['loss']
-                                       for output in outputs]).mean()
-        train_acc_mean = torch.stack([output['train_acc']
-                                      for output in outputs]).sum().float()
-        train_acc_mean /= (len(outputs) * self.batch_size)
-        return {'log': {'train_loss': train_loss_mean,
-                        'train_acc': train_acc_mean,
-                        'loss': train_loss_mean,
-                        'step': self.current_epoch}}
+        train_loss_mean = torch.stack([output['loss'] for output in outputs]).mean()
+        sum_of_correct = torch.stack([output['num_correct'] for output in outputs]).sum().float()
+        train_acc_mean = sum_of_correct / (len(outputs) * self.batch_size)
+        print(f"Training Epoch Loss: {train_loss_mean}, training epoch accuracy: {train_acc_mean}")
+        return {
+            'train_loss': train_loss_mean,
+            'train_acc': train_acc_mean,
+            'log': {
+                'train_acc': train_acc_mean,
+                'loss': train_loss_mean,
+                'step': self.current_epoch
+            }
+        }
 
     def validation_step(self, batch, batch_idx):
-        # 1. Forward pass:
-        x, y_true = batch
-        y_logits = self.forward(x)
+        val_loss, val_acc, val_num_correct = self.__step(batch)
 
-        # 2. Compute loss & accuracy:
-        val_loss = self.loss(y_logits, y_true)
-
-        with torch.no_grad():
-            val_acc = (torch.argmax(y_logits, dim=1) == y_true).float().mean()
-
-        return {'val_loss': val_loss,
-                'val_acc': val_acc}
+        return {
+            'val_loss': val_loss,
+            'val_acc': val_acc,
+            'val_num_correct': val_num_correct,
+            'log': {
+                'validation_loss': val_loss,
+                'validation_acc': val_acc,
+                'val_num_correct': val_num_correct
+            }
+        }
 
     def validation_epoch_end(self, outputs):
         """Compute and log validation loss and accuracy at the epoch level."""
 
-        val_loss_mean = torch.stack([output['val_loss']
-                                     for output in outputs]).mean()
-        val_acc_mean = torch.stack([output['val_acc']
-                                    for output in outputs]).sum().float()
-        val_acc_mean /= (len(outputs) * self.batch_size)
+        val_loss_mean = torch.stack([output['val_loss'] for output in outputs]).mean()
+        sum_of_correct = torch.stack([output['val_num_correct'] for output in outputs]).sum().float()
+        val_acc_mean = sum_of_correct / (len(outputs) * self.batch_size)
+        print(f"Validation Epoch Loss: {val_loss_mean}, validation epoch accuracy: {val_acc_mean}")
         return {
+            'val_loss': val_loss_mean,
+            'val_acc': val_acc_mean,
             'log': {
                 'val_loss': val_loss_mean,
                 'val_acc': val_acc_mean,
@@ -454,7 +466,7 @@ class TransferLearningModel(pl.LightningModule):
                             help='total number of epochs',
                             dest='nb_epochs')
         parser.add_argument('--batch-size',
-                            default=32,
+                            default=64,
                             type=int,
                             metavar='B',
                             help='batch size',
@@ -465,7 +477,7 @@ class TransferLearningModel(pl.LightningModule):
                             help='number of gpus to use')
         parser.add_argument('--lr',
                             '--learning-rate',
-                            default=1e-2,
+                            default=1e-3,
                             type=float,
                             metavar='LR',
                             help='initial learning rate',
@@ -535,10 +547,7 @@ def main(args: argparse.Namespace) -> None:
 
     df = pd.read_csv(args.train_csv)
     df = k_fold(df, args.folds)
-
-    # imagenet normalization
-    mean = (0.485, 0.456, 0.406)
-    std = (0.229, 0.224, 0.225)
+    df_test = pd.read_csv(args.test_csv)
 
     train_aug = albumentations.Compose(
         [
@@ -552,6 +561,19 @@ def main(args: argparse.Namespace) -> None:
             albumentations.Normalize(mean, std, max_pixel_value=255.0, always_apply=True)
         ]
     )
+
+    test_image_names = df_test.image
+    test_targets = df_test.label
+    test_dataset = CoralFragDataset(image_names=test_image_names,
+                                    targets=test_targets,
+                                    root_dir=args.root_data_path,
+                                    train=False,
+                                    resize=resize_to,
+                                    augmentations=valid_aug)
+    test_loader = DataLoader(dataset=test_dataset,
+                             batch_size=args.batch_size,
+                             shuffle=False,
+                             num_workers=args.num_workers)
 
     for fold in range(1):
         df_train = df[df["kfold"] != fold].reset_index(drop=True)
@@ -611,6 +633,7 @@ def main(args: argparse.Namespace) -> None:
         )
 
         trainer.fit(model, train_dataloader=train_loader, val_dataloaders=val_loader)
+        # trainer.test(model, test_dataloaders=test_loader)
         print(f"Fold {fold}: Training is DONE... Training on fold {fold} yielded following results:")
 
 
