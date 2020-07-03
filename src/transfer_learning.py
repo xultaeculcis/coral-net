@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
+import pytorch_lightning.metrics.functional as plm
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -440,6 +441,83 @@ class TransferLearningModel(pl.LightningModule):
             }
         }
 
+    def test_step(self, batch, batch_idx):
+        # 1. Forward pass:
+        x, y_true = batch
+        y_logits = self.forward(x)
+
+        # 2. Compute loss & performance metrics:
+        test_loss = self.loss(y_logits, y_true)
+        y_hat = torch.argmax(y_logits, dim=1)
+        acc = plm.accuracy(y_hat, y_true, num_classes=self.n_classes)
+        prec = plm.precision(y_hat, y_true, num_classes=self.n_classes)
+        rec = plm.recall(y_hat, y_true, num_classes=self.n_classes)
+        conf_matrix = plm.confusion_matrix(y_hat, y_true)
+        f1 = plm.f1_score(y_hat, y_true, num_classes=self.n_classes)
+
+        output = OrderedDict({'test_loss': test_loss,
+                              'test_acc': acc,
+                              'test_precision': prec,
+                              'test_recall': rec,
+                              'test_f1_score': f1,
+                              'test_confusion_matrix': conf_matrix,
+                              'y_true': y_true,
+                              'y_logits': y_logits,
+                              'y_hat': y_hat,
+                              'log': {
+                                  'test_loss': test_loss,
+                                  'test_acc': acc,
+                                  'test_precision': prec,
+                                  'test_recall': rec,
+                                  'test_f1_score': f1,
+                                  'test_confusion_matrix': conf_matrix,
+                              }})
+
+        return output
+
+    def test_epoch_end(self, outputs):
+        """Compute and log test loss and accuracy at the epoch level."""
+
+        test_loss_mean = torch.stack([output['test_loss'] for output in outputs]).mean()
+        test_acc_mean = torch.stack([output['test_acc'] for output in outputs]).mean()
+        test_prec_mean = torch.stack([output['test_precision'] for output in outputs]).mean()
+        test_rec_mean = torch.stack([output['test_recall'] for output in outputs]).mean()
+        test_f1_mean = torch.stack([output['test_f1_score'] for output in outputs]).mean()
+
+        y_true = torch.cat([output['y_true'] for output in outputs], dim=-1).to('cpu')
+        y_hat = torch.cat([output['y_hat'] for output in outputs], dim=-1).to('cpu')
+        y_logits = torch.cat([output['y_logits'] for output in outputs], dim=0).view(-1, 7).to('cpu')
+
+        test_avg_prec = plm.average_precision(y_logits, y_true)
+        test_confusion_matrix = plm.confusion_matrix(y_hat, y_true)
+        test_auroc = plm.auroc(y_logits, y_true)
+
+        test_conf_matrix_mean = test_confusion_matrix / (len(outputs) * self.batch_size)
+        print(f"Test Epoch Loss: {test_loss_mean}, training epoch accuracy: {test_acc_mean}")
+        print(f"Confusion matrix: \n{test_confusion_matrix.int()}")
+        print(f"Confusion matrix %: \n{test_conf_matrix_mean}")
+
+        # TODO plot & save conf matrices, train/validation/test learning curves & metrics
+        # TODO group metrics on Tesnorboard
+        # TODO rename training loss/acc to epoch loss/acc
+        # TODO use one-cycle LR scheduler after unfreezing whole model
+        # TODO Save test results into DF
+        # TODO Store current fold # in the model
+        # TODO Add Best model saver -> save models into '../model_weights/model-name-fold-k.pth'
+
+        return {
+            'log': {
+                'test_loss': test_loss_mean,
+                'test_acc': test_acc_mean,
+                'step': self.current_epoch,
+                'test_precision': test_prec_mean,
+                'test_recall': test_rec_mean,
+                'test_f1_score': test_f1_mean,
+                'test_average_precision': test_avg_prec,
+                'test_AUROC': test_auroc,
+            }
+        }
+
     def configure_optimizers(self):
         optimizer = optim.Adam(filter(lambda p: p.requires_grad,
                                       self.parameters()),
@@ -632,8 +710,8 @@ def main(args: argparse.Namespace) -> None:
             # fast_dev_run=True
         )
 
-        trainer.fit(model, train_dataloader=train_loader, val_dataloaders=val_loader)
-        # trainer.test(model, test_dataloaders=test_loader)
+        # trainer.fit(model, train_dataloader=train_loader, val_dataloaders=val_loader)
+        trainer.test(model, test_dataloaders=test_loader)
         print(f"Fold {fold}: Training is DONE... Training on fold {fold} yielded following results:")
 
 
