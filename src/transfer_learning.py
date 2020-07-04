@@ -20,6 +20,7 @@ Note:
 """
 
 import argparse
+import itertools
 import os
 from collections import OrderedDict
 from pprint import pprint
@@ -53,6 +54,55 @@ mean = (0.485, 0.456, 0.406)
 std = (0.229, 0.224, 0.225)
 # reproducibility
 SEED = 42  # Answer to the Ultimate Question of Life, the Universe, and Everything
+
+
+class ImbalancedDatasetSampler(torch.utils.data.sampler.Sampler):
+    """
+    Samples elements randomly from a given list of indices for imbalanced dataset
+    Original implementation: https://github.com/ufoym/imbalanced-dataset-sampler
+
+    Arguments:
+        indices (list, optional): a list of indices
+        num_samples (int, optional): number of samples to draw
+        callback_get_label func: a callback-like function which takes two arguments - dataset and index
+    """
+
+    def __init__(self, dataset, indices=None, num_samples=None):
+        super().__init__(dataset)
+        self.dataset = dataset
+        # if indices is not provided,
+        # all elements in the dataset will be considered
+        self.indices = list(range(len(dataset))) \
+            if indices is None else indices
+
+        # if num_samples is not provided,
+        # draw `len(indices)` samples in each iteration
+        self.num_samples = len(self.indices) \
+            if num_samples is None else num_samples
+
+        # distribution of classes in the dataset
+        label_to_count = {}
+        for idx in self.indices:
+            label = self._get_label(idx)
+            if label in label_to_count:
+                label_to_count[label] += 1
+            else:
+                label_to_count[label] = 1
+
+        # weight for each sample
+        weights = [1.0 / label_to_count[self._get_label(idx)]
+                   for idx in self.indices]
+        self.weights = torch.as_tensor(weights, dtype=torch.double)
+
+    def _get_label(self, idx):
+        return self.dataset.label_for(idx)
+
+    def __iter__(self):
+        return (self.indices[i.item()] for i in torch.multinomial(
+            self.weights, self.num_samples, replacement=True))
+
+    def __len__(self):
+        return self.num_samples
 
 
 #  --- Utility functions ---
@@ -153,6 +203,66 @@ def _unfreeze_and_add_param_group(module: Module,
     })
 
 
+def _plot_confusion_matrix(cm,
+                           target_names,
+                           title='Confusion matrix',
+                           cmap=None,
+                           normalize=True):
+    """
+    Given a confusion matrix (cm), make a nice plot.
+    Based on Scikit Learn's implementation.
+
+    Arguments
+    ---------
+    cm:           confusion matrix from sklearn.metrics.confusion_matrix
+
+    target_names: given classification classes such as [0, 1, 2]
+                  the class names, for example: ['high', 'medium', 'low']
+
+    title:        the text to display at the top of the matrix
+
+    cmap:         the gradient of the values displayed from matplotlib.pyplot.cm
+                  see http://matplotlib.org/examples/color/colormaps_reference.html
+                  plt.get_cmap('jet') or plt.cm.Blues
+
+    normalize:    If False, plot the raw numbers
+                  If True, plot the proportions
+    """
+
+    if cmap is None:
+        cmap = plt.get_cmap('Blues')
+
+    figure = plt.figure(figsize=(8, 6))
+    plt.imshow(cm, interpolation='nearest', cmap=cmap)
+    plt.title(title)
+    plt.colorbar()
+
+    if target_names is not None:
+        tick_marks = np.arange(len(target_names))
+        plt.xticks(tick_marks, target_names, rotation=45)
+        plt.yticks(tick_marks, target_names)
+
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
+
+    thresh = cm.max() / 1.5 if normalize else cm.max() / 2
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        if normalize:
+            plt.text(j, i, "{:0.2f}".format(cm[i, j]),
+                     horizontalalignment="center",
+                     color="white" if cm[i, j] > thresh else "black")
+        else:
+            plt.text(j, i, "{:,}".format(cm[i, j]),
+                     horizontalalignment="center",
+                     color="white" if cm[i, j] > thresh else "black")
+
+    plt.tight_layout()
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
+
+    return figure
+
+
 def k_fold(df: DataFrame, k: int = 5):
     print(f"Creating folds. k = {k}")
     df["kfold"] = -1
@@ -221,6 +331,9 @@ class CoralFragDataset(Dataset):
 
         return img_tensor, target_tensor
 
+    def label_for(self, idx):
+        return self.targets[idx]
+
     def as_pillow(self, idx):
         image_name = self.image_names[idx]
         image_path = os.path.join(self.root_dir, "train" if self.train else "test", image_name)
@@ -229,7 +342,6 @@ class CoralFragDataset(Dataset):
         return image, self.class_lookup_by_index[targets]
 
     def plot_sample_batch(self):
-        import matplotlib.pyplot as plt
         fig, ax = plt.subplots(8, 4, figsize=(12, 20))
         t = np.random.randint(0, self.__len__())
         for i in range(8):
@@ -266,6 +378,8 @@ class TransferLearningModel(pl.LightningModule):
     """
 
     def __init__(self,
+                 fold: int = 0,
+                 classes: list = None,
                  backbone: str = 'resnet18',
                  train_bn: bool = True,
                  milestones: tuple = (5, 10),
@@ -292,8 +406,9 @@ class TransferLearningModel(pl.LightningModule):
         self.lr = lr
         self.lr_scheduler_gamma = lr_scheduler_gamma
         self.n_classes = n_classes
+        self.classes = classes
         self.num_workers = num_workers
-
+        self.fold = fold
         self.__build_model()
 
     def __build_model(self):
@@ -379,6 +494,76 @@ class TransferLearningModel(pl.LightningModule):
 
         return loss, acc, num_correct
 
+    def __metrics_per_batch(self, batch):
+        # 1. Forward pass:
+        x, y_true = batch
+        logits = self.forward(x)
+
+        # 2. Compute loss & performance metrics:
+        loss = self.loss(logits, y_true)
+        y_hat = torch.argmax(logits, dim=1)
+        acc = plm.accuracy(y_hat, y_true, num_classes=self.n_classes)
+        prec = plm.precision(y_hat, y_true, num_classes=self.n_classes)
+        rec = plm.recall(y_hat, y_true, num_classes=self.n_classes)
+        f1 = plm.f1_score(y_hat, y_true, num_classes=self.n_classes)
+        conf_matrix = plm.confusion_matrix(y_hat, y_true)
+
+        return (
+            y_true,
+            y_hat,
+            logits,
+            loss,
+            acc,
+            prec,
+            rec,
+            f1,
+            conf_matrix
+        )
+
+    @staticmethod
+    def __metrics_per_epoch(outputs):
+        loss_mean = torch.stack([output[f'loss'] for output in outputs]).mean()
+        acc_mean = torch.stack([output[f'acc'] for output in outputs]).mean()
+        prec_mean = torch.stack([output[f'precision'] for output in outputs]).mean()
+        rec_mean = torch.stack([output[f'recall'] for output in outputs]).mean()
+        f1_mean = torch.stack([output[f'f1_score'] for output in outputs]).mean()
+        y_true = torch.cat([output['y_true'] for output in outputs], dim=-1)
+        y_hat = torch.cat([output['y_hat'] for output in outputs], dim=-1)
+
+        confusion_matrix = plm.confusion_matrix(y_hat, y_true)
+
+        return (
+            y_true,
+            y_hat,
+            loss_mean,
+            acc_mean,
+            prec_mean,
+            rec_mean,
+            f1_mean,
+            confusion_matrix
+        )
+
+    def __log_confusion_matrices(self, conf_matrix, stage):
+        confusion_matrix_figure = _plot_confusion_matrix(
+            cm=conf_matrix,
+            target_names=self.classes,
+            title=f"{stage} confusion matrix for fold #{self.fold}",
+            normalize=False
+        )
+        normalized_confusion_matrix_figure = _plot_confusion_matrix(
+            cm=conf_matrix,
+            target_names=self.classes,
+            title=f"{stage} confusion matrix for fold #{self.fold}",
+            normalize=True
+        )
+
+        self.logger.experiment.add_figure(tag=f"{stage}/confusion_matrix",
+                                          figure=confusion_matrix_figure,
+                                          global_step=self.current_epoch)
+        self.logger.experiment.add_figure(tag=f"{stage}/normalized_confusion_matrix",
+                                          figure=normalized_confusion_matrix_figure,
+                                          global_step=self.current_epoch)
+
     def training_step(self, batch, batch_idx):
         train_loss, train_acc, num_correct = self.__step(batch)
 
@@ -386,9 +571,8 @@ class TransferLearningModel(pl.LightningModule):
                               'num_correct': num_correct,
                               'train_acc': train_acc,
                               'log': {
-                                  'training_loss': train_loss,
-                                  'training_acc': train_acc,
-                                  'num_correct': num_correct
+                                  'Train/loss': train_loss,
+                                  'Train/acc': train_acc,
                               }})
 
         return output
@@ -401,105 +585,88 @@ class TransferLearningModel(pl.LightningModule):
         train_acc_mean = sum_of_correct / (len(outputs) * self.batch_size)
         print(f"Training Epoch Loss: {train_loss_mean}, training epoch accuracy: {train_acc_mean}")
         return {
-            'train_loss': train_loss_mean,
-            'train_acc': train_acc_mean,
+            'loss': train_loss_mean,
+            'acc': train_acc_mean,
             'log': {
-                'train_acc': train_acc_mean,
-                'loss': train_loss_mean,
+                'Train/epoch/acc': train_acc_mean,
+                'Train/epoch/loss': train_loss_mean,
                 'step': self.current_epoch
             }
         }
 
     def validation_step(self, batch, batch_idx):
-        val_loss, val_acc, val_num_correct = self.__step(batch)
+        y_true, y_hat, logits, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
 
         return {
-            'val_loss': val_loss,
-            'val_acc': val_acc,
-            'val_num_correct': val_num_correct,
+            'loss': loss,
+            'acc': acc,
+            'precision': prec,
+            'recall': rec,
+            'f1_score': f1,
+            'confusion_matrix': conf_matrix,
+            'y_true': y_true,
+            'y_logits': logits,
+            'y_hat': y_hat,
             'log': {
-                'validation_loss': val_loss,
-                'validation_acc': val_acc,
-                'val_num_correct': val_num_correct
+                'Validation/loss': loss,
+                'Validation/acc': acc,
+                'Validation/precision': prec,
+                'Validation/recall': rec,
+                'Validation/f1_score': f1,
             }
         }
 
     def validation_epoch_end(self, outputs):
         """Compute and log validation loss and accuracy at the epoch level."""
+        y_true, y_hat, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_epoch(outputs)
+        self.__log_confusion_matrices(conf_matrix.cpu().numpy().astype('int'), "Validation")
 
-        val_loss_mean = torch.stack([output['val_loss'] for output in outputs]).mean()
-        sum_of_correct = torch.stack([output['val_num_correct'] for output in outputs]).sum().float()
-        val_acc_mean = sum_of_correct / (len(outputs) * self.batch_size)
-        print(f"Validation Epoch Loss: {val_loss_mean}, validation epoch accuracy: {val_acc_mean}")
+        print(f"Validation Epoch Loss: {loss}, validation epoch accuracy: {acc}")
         return {
-            'val_loss': val_loss_mean,
-            'val_acc': val_acc_mean,
+            'val_loss': loss,
+            'val_acc': acc,
             'log': {
-                'val_loss': val_loss_mean,
-                'val_acc': val_acc_mean,
-                'step': self.current_epoch
+                'Validation/loss/epoch': loss,
+                'Validation/acc/epoch': acc,
+                'step': self.current_epoch,
+                'Validation/precision/epoch': prec,
+                'Validation/recall/epoch': rec,
+                'Validation/f1_score/epoch': f1,
             }
         }
 
     def test_step(self, batch, batch_idx):
-        # 1. Forward pass:
-        x, y_true = batch
-        y_logits = self.forward(x)
+        y_true, y_hat, logits, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
 
-        # 2. Compute loss & performance metrics:
-        test_loss = self.loss(y_logits, y_true)
-        y_hat = torch.argmax(y_logits, dim=1)
-        acc = plm.accuracy(y_hat, y_true, num_classes=self.n_classes)
-        prec = plm.precision(y_hat, y_true, num_classes=self.n_classes)
-        rec = plm.recall(y_hat, y_true, num_classes=self.n_classes)
-        conf_matrix = plm.confusion_matrix(y_hat, y_true)
-        f1 = plm.f1_score(y_hat, y_true, num_classes=self.n_classes)
-
-        output = OrderedDict({'test_loss': test_loss,
-                              'test_acc': acc,
-                              'test_precision': prec,
-                              'test_recall': rec,
-                              'test_f1_score': f1,
-                              'test_confusion_matrix': conf_matrix,
+        output = OrderedDict({'loss': loss,
+                              'acc': acc,
+                              'precision': prec,
+                              'recall': rec,
+                              'f1_score': f1,
+                              'confusion_matrix': conf_matrix,
                               'y_true': y_true,
-                              'y_logits': y_logits,
+                              'y_logits': logits,
                               'y_hat': y_hat,
                               'log': {
-                                  'test_loss': test_loss,
-                                  'test_acc': acc,
-                                  'test_precision': prec,
-                                  'test_recall': rec,
-                                  'test_f1_score': f1,
-                                  'test_confusion_matrix': conf_matrix,
+                                  'Test/loss': loss,
+                                  'Test/acc': acc,
+                                  'Test/precision': prec,
+                                  'Test/recall': rec,
+                                  'Test/f1_score': f1,
                               }})
 
         return output
 
     def test_epoch_end(self, outputs):
         """Compute and log test loss and accuracy at the epoch level."""
+        y_true, y_hat, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_epoch(outputs)
 
-        test_loss_mean = torch.stack([output['test_loss'] for output in outputs]).mean()
-        test_acc_mean = torch.stack([output['test_acc'] for output in outputs]).mean()
-        test_prec_mean = torch.stack([output['test_precision'] for output in outputs]).mean()
-        test_rec_mean = torch.stack([output['test_recall'] for output in outputs]).mean()
-        test_f1_mean = torch.stack([output['test_f1_score'] for output in outputs]).mean()
+        self.__log_confusion_matrices(conf_matrix.cpu().numpy().astype('int'), "Test")
 
-        y_true = torch.cat([output['y_true'] for output in outputs], dim=-1).to('cpu')
-        y_hat = torch.cat([output['y_hat'] for output in outputs], dim=-1).to('cpu')
-        y_logits = torch.cat([output['y_logits'] for output in outputs], dim=0).view(-1, 7).to('cpu')
+        print(f"Test Epoch Loss: {loss}, training epoch accuracy: {acc}")
+        print(f"Confusion matrix: \n{conf_matrix.int()}")
 
-        test_avg_prec = plm.average_precision(y_logits, y_true)
-        test_confusion_matrix = plm.confusion_matrix(y_hat, y_true)
-        test_auroc = plm.auroc(y_logits, y_true)
-
-        test_conf_matrix_mean = test_confusion_matrix / (len(outputs) * self.batch_size)
-        print(f"Test Epoch Loss: {test_loss_mean}, training epoch accuracy: {test_acc_mean}")
-        print(f"Confusion matrix: \n{test_confusion_matrix.int()}")
-        print(f"Confusion matrix %: \n{test_conf_matrix_mean}")
-
-        # TODO plot & save conf matrices, train/validation/test learning curves & metrics
-        # TODO group metrics on Tesnorboard
-        # TODO rename training loss/acc to epoch loss/acc
+        # TODO plot & save conf matrices
         # TODO use one-cycle LR scheduler after unfreezing whole model
         # TODO Save test results into DF
         # TODO Store current fold # in the model
@@ -507,14 +674,11 @@ class TransferLearningModel(pl.LightningModule):
 
         return {
             'log': {
-                'test_loss': test_loss_mean,
-                'test_acc': test_acc_mean,
-                'step': self.current_epoch,
-                'test_precision': test_prec_mean,
-                'test_recall': test_rec_mean,
-                'test_f1_score': test_f1_mean,
-                'test_average_precision': test_avg_prec,
-                'test_AUROC': test_auroc,
+                'Test/epoch_loss': loss,
+                'Test/epoch_acc': acc,
+                'Test/epoch_precision': prec,
+                'Test/epoch_recall': rec,
+                'Test/epoch_f1_score': f1,
             }
         }
 
@@ -538,7 +702,7 @@ class TransferLearningModel(pl.LightningModule):
                             metavar='BK',
                             help='Name (as in ``torchvision.models``) of the feature extractor')
         parser.add_argument('--epochs',
-                            default=20,
+                            default=2,
                             type=int,
                             metavar='N',
                             help='total number of epochs',
@@ -679,7 +843,7 @@ def main(args: argparse.Namespace) -> None:
 
         train_loader = DataLoader(dataset=train_dataset,
                                   batch_size=args.batch_size,
-                                  shuffle=True,
+                                  sampler=ImbalancedDatasetSampler(train_dataset),
                                   num_workers=args.num_workers)
 
         val_loader = torch.utils.data.DataLoader(dataset=val_dataset,
@@ -688,7 +852,7 @@ def main(args: argparse.Namespace) -> None:
                                                  num_workers=args.num_workers)
 
         print(f"Fold {fold}: Training is starting...")
-        model = TransferLearningModel(**vars(args))
+        model = TransferLearningModel(fold=fold, classes=train_dataset.classes, **vars(args))
         logger = TensorBoardLogger("logs", name=f"{args.backbone}-fold-{fold}")
         early_stop_callback = EarlyStopping(
             monitor='val_loss',
@@ -710,7 +874,7 @@ def main(args: argparse.Namespace) -> None:
             # fast_dev_run=True
         )
 
-        # trainer.fit(model, train_dataloader=train_loader, val_dataloaders=val_loader)
+        trainer.fit(model, train_dataloader=train_loader, val_dataloaders=val_loader)
         trainer.test(model, test_dataloaders=test_loader)
         print(f"Fold {fold}: Training is DONE... Training on fold {fold} yielded following results:")
 
