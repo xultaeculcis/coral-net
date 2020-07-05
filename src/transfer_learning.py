@@ -1,14 +1,11 @@
 """Computer vision example on Transfer Learning.
 This computer vision example illustrates how one could fine-tune a pre-trained
-network (by default, a ResNet50 is used) using pytorch-lightning. For the sake
-of this example, the 'cats and dogs dataset' (~60MB, see `DATA_URL` below) and
-the proposed network (denoted by `TransferLearningModel`, see below) is
-trained for 15 epochs. The training consists in three stages. From epoch 0 to
-4, the feature extractor (the pre-trained network) is frozen except maybe for
-the BatchNorm layers (depending on whether `train_bn = True`). The BatchNorm
-layers (if `train_bn = True`) and the parameters of the classifier are trained
-as a single parameters group with lr = 1e-2. From epoch 5 to 9, the last two
-layer groups of the pre-trained network are unfrozen and added to the
+network using pytorch-lightning. The training consists in three stages.
+From epoch 0 to 4, the feature extractor (the pre-trained network) is frozen
+except maybe for the BatchNorm layers (depending on whether `train_bn = True`).
+The BatchNorm layers (if `train_bn = True`) and the parameters of the classifier
+are trained as a single parameters group with lr = 1e-3. From epoch 5 to 9,
+the last two layer groups of the pre-trained network are unfrozen and added to the
 optimizer as a new parameter group with lr = 1e-4 (while lr = 1e-3 for the
 first parameter group in the optimizer). Eventually, from epoch 10, all the
 remaining layer groups of the pre-trained network are unfrozen and added to
@@ -37,7 +34,7 @@ import torch.nn.functional as F
 from PIL import Image
 from PIL import ImageFile
 from pandas import DataFrame
-from pytorch_lightning.callbacks import EarlyStopping
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from sklearn import model_selection
 from torch import optim
@@ -436,48 +433,6 @@ class TransferLearningModel(pl.LightningModule):
         # 3. Loss:
         self.loss_func = F.binary_cross_entropy_with_logits if self.n_classes == 1 else F.cross_entropy
 
-    def forward(self, x):
-        """Forward pass. Returns logits."""
-        # 1. Feature extraction:
-        x = self.feature_extractor(x)
-        x = x.squeeze(-1).squeeze(-1)
-
-        # 2. Classifier (returns logits):
-        x = self.fc(x)
-
-        return x
-
-    def loss(self, logits, labels):
-        return self.loss_func(input=logits, target=labels)
-
-    def train(self, mode=True):
-        super().train(mode=mode)
-
-        epoch = self.current_epoch
-        if epoch < self.milestones[0] and mode:
-            # feature extractor is frozen (except for BatchNorm layers)
-            freeze(module=self.feature_extractor,
-                   train_bn=self.train_bn)
-
-        elif self.milestones[0] <= epoch < self.milestones[1] and mode:
-            # Unfreeze last two layers of the feature extractor
-            freeze(module=self.feature_extractor,
-                   n=-2,
-                   train_bn=self.train_bn)
-
-    def on_epoch_start(self):
-        """Use `on_epoch_start` to unfreeze layers progressively."""
-        optimizer = self.trainer.optimizers[0]
-        if self.current_epoch == self.milestones[0]:
-            _unfreeze_and_add_param_group(module=self.feature_extractor[-2:],
-                                          optimizer=optimizer,
-                                          train_bn=self.train_bn)
-
-        elif self.current_epoch == self.milestones[1]:
-            _unfreeze_and_add_param_group(module=self.feature_extractor[:-2],
-                                          optimizer=optimizer,
-                                          train_bn=self.train_bn)
-
     def __step(self, batch):
         # 1. Forward pass:
         x, y_true = batch
@@ -520,29 +475,6 @@ class TransferLearningModel(pl.LightningModule):
             conf_matrix
         )
 
-    @staticmethod
-    def __metrics_per_epoch(outputs):
-        loss_mean = torch.stack([output[f'loss'] for output in outputs]).mean()
-        acc_mean = torch.stack([output[f'acc'] for output in outputs]).mean()
-        prec_mean = torch.stack([output[f'precision'] for output in outputs]).mean()
-        rec_mean = torch.stack([output[f'recall'] for output in outputs]).mean()
-        f1_mean = torch.stack([output[f'f1_score'] for output in outputs]).mean()
-        y_true = torch.cat([output['y_true'] for output in outputs], dim=-1)
-        y_hat = torch.cat([output['y_hat'] for output in outputs], dim=-1)
-
-        confusion_matrix = plm.confusion_matrix(y_hat, y_true)
-
-        return (
-            y_true,
-            y_hat,
-            loss_mean,
-            acc_mean,
-            prec_mean,
-            rec_mean,
-            f1_mean,
-            confusion_matrix
-        )
-
     def __log_confusion_matrices(self, conf_matrix, stage):
         confusion_matrix_figure = _plot_confusion_matrix(
             cm=conf_matrix,
@@ -564,6 +496,48 @@ class TransferLearningModel(pl.LightningModule):
                                           figure=normalized_confusion_matrix_figure,
                                           global_step=self.current_epoch)
 
+    def forward(self, x):
+        """Forward pass. Returns logits."""
+        # 1. Feature extraction:
+        x = self.feature_extractor(x)
+        x = x.squeeze(-1).squeeze(-1)
+
+        # 2. Classifier (returns logits):
+        x = self.fc(x)
+
+        return x
+
+    def loss(self, logits, labels):
+        return self.loss_func(input=logits, target=labels)
+
+    def train(self, mode=True):
+        super().train(mode=mode)
+
+        epoch = self.current_epoch
+        if epoch < self.milestones[0] and mode:
+            # feature extractor is frozen (except for BatchNorm layers)
+            freeze(module=self.feature_extractor,
+                   train_bn=self.train_bn)
+
+        elif self.milestones[0] <= epoch < self.milestones[1] and mode:
+            # Unfreeze last two layers of the feature extractor
+            freeze(module=self.feature_extractor,
+                   n=-2,
+                   train_bn=self.train_bn)
+
+    def on_epoch_start(self):
+        """Use `on_epoch_start` to unfreeze layers progressively."""
+        optimizer = self.trainer.optimizers[0]
+        if self.current_epoch == self.milestones[0]:
+            _unfreeze_and_add_param_group(module=self.feature_extractor[-2:],
+                                          optimizer=optimizer,
+                                          train_bn=self.train_bn)
+
+        elif self.current_epoch == self.milestones[1]:
+            _unfreeze_and_add_param_group(module=self.feature_extractor[:-2],
+                                          optimizer=optimizer,
+                                          train_bn=self.train_bn)
+
     def training_step(self, batch, batch_idx):
         train_loss, train_acc, num_correct = self.__step(batch)
 
@@ -573,6 +547,7 @@ class TransferLearningModel(pl.LightningModule):
                               'log': {
                                   'Train/loss': train_loss,
                                   'Train/acc': train_acc,
+                                  'Train/lr': self.trainer.optimizers[0].param_groups[0]['lr']
                               }})
 
         return output
@@ -590,6 +565,7 @@ class TransferLearningModel(pl.LightningModule):
             'log': {
                 'Train/epoch/acc': train_acc_mean,
                 'Train/epoch/loss': train_loss_mean,
+                'Train/epoch/lr': self.trainer.optimizers[0].param_groups[0]['lr'],
                 'step': self.current_epoch
             }
         }
@@ -621,10 +597,11 @@ class TransferLearningModel(pl.LightningModule):
         y_true, y_hat, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_epoch(outputs)
         self.__log_confusion_matrices(conf_matrix.cpu().numpy().astype('int'), "Validation")
 
-        print(f"Validation Epoch Loss: {loss}, validation epoch accuracy: {acc}")
+        print(f"\nValidation Epoch Loss: {loss:.4f}, validation epoch accuracy: {acc:.4f}")
         return {
             'val_loss': loss,
             'val_acc': acc,
+            'val_f1': f1,  # for saving the best model
             'log': {
                 'Validation/loss/epoch': loss,
                 'Validation/acc/epoch': acc,
@@ -663,14 +640,12 @@ class TransferLearningModel(pl.LightningModule):
 
         self.__log_confusion_matrices(conf_matrix.cpu().numpy().astype('int'), "Test")
 
-        print(f"Test Epoch Loss: {loss}, training epoch accuracy: {acc}")
+        print(f"\nTest Epoch Loss: {loss:.4f}, training epoch accuracy: {acc:.4f}")
         print(f"Confusion matrix: \n{conf_matrix.int()}")
 
-        # TODO plot & save conf matrices
         # TODO use one-cycle LR scheduler after unfreezing whole model
         # TODO Save test results into DF
-        # TODO Store current fold # in the model
-        # TODO Add Best model saver -> save models into '../model_weights/model-name-fold-k.pth'
+        # TODO handle binary classification
 
         return {
             'log': {
@@ -694,6 +669,29 @@ class TransferLearningModel(pl.LightningModule):
         return [optimizer], [scheduler]
 
     @staticmethod
+    def __metrics_per_epoch(outputs):
+        loss_mean = torch.stack([output[f'loss'] for output in outputs]).mean()
+        acc_mean = torch.stack([output[f'acc'] for output in outputs]).mean()
+        prec_mean = torch.stack([output[f'precision'] for output in outputs]).mean()
+        rec_mean = torch.stack([output[f'recall'] for output in outputs]).mean()
+        f1_mean = torch.stack([output[f'f1_score'] for output in outputs]).mean()
+        y_true = torch.cat([output['y_true'] for output in outputs], dim=-1)
+        y_hat = torch.cat([output['y_hat'] for output in outputs], dim=-1)
+
+        confusion_matrix = plm.confusion_matrix(y_hat, y_true)
+
+        return (
+            y_true,
+            y_hat,
+            loss_mean,
+            acc_mean,
+            prec_mean,
+            rec_mean,
+            f1_mean,
+            confusion_matrix
+        )
+
+    @staticmethod
     def add_model_specific_args(parent_parser):
         parser = argparse.ArgumentParser(parents=[parent_parser])
         parser.add_argument('--backbone',
@@ -705,24 +703,24 @@ class TransferLearningModel(pl.LightningModule):
                             default=2,
                             type=int,
                             metavar='N',
-                            help='total number of epochs',
+                            help='Total number of epochs',
                             dest='nb_epochs')
         parser.add_argument('--batch-size',
                             default=64,
                             type=int,
                             metavar='B',
-                            help='batch size',
+                            help='Batch size',
                             dest='batch_size')
         parser.add_argument('--gpus',
                             type=int,
                             default=1,
-                            help='number of gpus to use')
+                            help='Number of GPUs to use')
         parser.add_argument('--lr',
                             '--learning-rate',
                             default=1e-3,
                             type=float,
                             metavar='LR',
-                            help='initial learning rate',
+                            help='Initial learning rate',
                             dest='lr')
         parser.add_argument('--lr-scheduler-gamma',
                             default=1e-1,
@@ -734,18 +732,18 @@ class TransferLearningModel(pl.LightningModule):
                             default=8,
                             type=int,
                             metavar='W',
-                            help='number of CPU workers',
+                            help='Number of CPU workers',
                             dest='num_workers')
         parser.add_argument('--num-classes',
                             default=7,
                             type=int,
-                            help='number of classes to classify',
+                            help='Number of classes to classify',
                             dest='n_classes')
         parser.add_argument('--folds',
                             default=5,
                             type=int,
                             metavar='F',
-                            help='number of folds in k-Fold Cross Validation',
+                            help='Number of folds in k-Fold Cross Validation',
                             dest='folds')
         parser.add_argument('--train-bn',
                             default=True,
@@ -768,6 +766,16 @@ class TransferLearningModel(pl.LightningModule):
                             type=str,
                             help='Path to test csv file',
                             dest='test_csv')
+        parser.add_argument('--save-model-path',
+                            default="../model-weights",
+                            type=str,
+                            help='Where to save the best model checkpoints',
+                            dest='save_model_path')
+        parser.add_argument('--save-top-k',
+                            default=1,
+                            type=int,
+                            help='How many best k models to save',
+                            dest='save_top_k')
         return parser
 
 
@@ -855,11 +863,17 @@ def main(args: argparse.Namespace) -> None:
         model = TransferLearningModel(fold=fold, classes=train_dataset.classes, **vars(args))
         logger = TensorBoardLogger("logs", name=f"{args.backbone}-fold-{fold}")
         early_stop_callback = EarlyStopping(
-            monitor='val_loss',
+            monitor='val_f1',
             min_delta=0.00,
             patience=5,
             verbose=True,
             mode='max'
+        )
+        checkpoint_callback = ModelCheckpoint(
+            filepath=os.path.join(args.save_model_path, f"checkpoint-fold-{fold}" + "-{epoch:02d}-{val_f1:.2f}"),
+            save_top_k=args.save_top_k,
+            monitor="val_f1",
+            mode="max"
         )
         trainer = pl.Trainer(
             weights_summary=None,
@@ -871,6 +885,7 @@ def main(args: argparse.Namespace) -> None:
             deterministic=True,
             benchmark=False,
             early_stop_callback=early_stop_callback,
+            checkpoint_callback=checkpoint_callback,
             # fast_dev_run=True
         )
 
