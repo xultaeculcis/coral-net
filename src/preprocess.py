@@ -38,7 +38,6 @@ def build_data_frame(image_dict, binary=False):
                     "label": 1 if cls == positive_class else 0,
                     "text_label": positive_class if cls == positive_class else "other"
                 }
-
             else:
                 df_data = {
                     "image": img_name,
@@ -72,11 +71,11 @@ def create_folds(frame_path):
     return new_frame
 
 
-def move_data(train_df: pd.DataFrame, test_df, binary=False):
+def move_data(train_df: pd.DataFrame, test_df):
     print("Moving data to train and test folders")
     # make sure the dirs exist
-    train_dir = os.path.join(output_data_dir, "train" if binary else "train_binary")
-    test_dir = os.path.join(output_data_dir, "test" if binary else "test_binary")
+    train_dir = os.path.join(output_data_dir, "train")
+    test_dir = os.path.join(output_data_dir, "test")
     try:
         os.mkdir(train_dir)
         os.mkdir(test_dir)
@@ -116,18 +115,18 @@ def main(binary=False):
         random_state=RANDOM_SEED
     )
 
-    X_train.to_csv(os.path.join(datasets_dir, "train_binary.csv" if binary else "train.csv"), index=False)
+    X_train.to_csv(os.path.join(datasets_dir, "train.csv"), index=False)
 
-    df = create_folds(os.path.join(datasets_dir, "train_binary.csv" if binary else "train.csv"))
+    df = create_folds(os.path.join(datasets_dir, "train.csv"))
 
     move_data(X_train, X_test)
 
     X_train = normalize_image_names_in_df(df)
     X_test = normalize_image_names_in_df(X_test)
 
-    X_train.to_csv(os.path.join(datasets_dir, "train_binary.csv" if binary else "train.csv"), index=False)
-    X_test.to_csv(os.path.join(datasets_dir, "test_binary.csv" if binary else "test.csv"), index=False)
+    X_train.to_csv(os.path.join(datasets_dir, "train.csv"), index=False)
+    X_test.to_csv(os.path.join(datasets_dir, "test.csv"), index=False)
 
 
 if __name__ == "__main__":
-    main(binary=True)
+    main(binary=False)

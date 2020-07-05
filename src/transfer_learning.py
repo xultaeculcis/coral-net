@@ -280,6 +280,7 @@ class CoralFragDataset(Dataset):
     def __init__(self,
                  image_names: list,
                  targets: list,
+                 binary=False,
                  root_dir: str = "./",
                  train: bool = True,
                  resize=None,
@@ -290,6 +291,7 @@ class CoralFragDataset(Dataset):
         self.train = train
         self.resize = resize
         self.augmentations = augmentations
+        self.binary = binary
         self.classes = [
             "Montipora",
             "Other",
@@ -298,6 +300,9 @@ class CoralFragDataset(Dataset):
             "Euphyllia",
             "Chalice",
             "Acanthastrea"
+        ] if not binary else [
+            "Other",
+            "Acropora"
         ]
         self.class_lookup_by_name = dict([(c, i) for i, c in enumerate(self.classes)])
         self.class_lookup_by_index = dict([(i, c) for i, c in enumerate(self.classes)])
@@ -384,6 +389,7 @@ class TransferLearningModel(pl.LightningModule):
                  lr: float = 1e-3,
                  lr_scheduler_gamma: float = 1e-1,
                  n_classes: int = 7,
+                 n_outputs: int = 7,
                  num_workers: int = 8, **kwargs) -> None:
         super().__init__()
 
@@ -403,6 +409,7 @@ class TransferLearningModel(pl.LightningModule):
         self.lr = lr
         self.lr_scheduler_gamma = lr_scheduler_gamma
         self.n_classes = n_classes
+        self.n_outputs = n_outputs
         self.classes = classes
         self.num_workers = num_workers
         self.fold = fold
@@ -427,23 +434,23 @@ class TransferLearningModel(pl.LightningModule):
                       torch.nn.Linear(256, 32),
                       torch.nn.ReLU(),
                       torch.nn.Dropout(),
-                      torch.nn.Linear(32, self.n_classes)]
+                      torch.nn.Linear(32, self.n_outputs)]
         self.fc = torch.nn.Sequential(*_fc_layers)
 
         # 3. Loss:
-        self.loss_func = F.binary_cross_entropy_with_logits if self.n_classes == 1 else F.cross_entropy
+        self.loss_func = F.binary_cross_entropy_with_logits if self.n_outputs == 1 else F.cross_entropy
 
     def __step(self, batch):
         # 1. Forward pass:
-        x, y_true = batch
+        x, y = batch
         y_logits = self.forward(x)
 
         # 2. Compute loss & accuracy:
-        loss = self.loss(y_logits, y_true)
+        loss = self.loss(y_logits, y if self.n_outputs > 1 else y.view((-1, 1)).type_as(x))
 
         with torch.no_grad():
-            y_hat = torch.argmax(y_logits, dim=1)
-            acc = plm.accuracy(y_hat, y_true, self.n_classes)
+            y_hat = torch.argmax(y_logits, dim=1) if self.n_outputs > 1 else (y_logits >= 0.0).squeeze(1).long()
+            acc = plm.accuracy(y_hat, y, self.n_classes)
 
         return loss, acc
 
@@ -453,13 +460,15 @@ class TransferLearningModel(pl.LightningModule):
         logits = self.forward(x)
 
         # 2. Compute loss & performance metrics:
-        loss = self.loss(logits, y_true)
-        y_hat = torch.argmax(logits, dim=1)
+        # class prediction: if binary (num_outputs == 1) then class label is 0 if logit < 0 else it's 1
+        # if multiclass then simply run argmax to find the index of the most confident class
+        y_hat = torch.argmax(logits, dim=1) if self.n_outputs > 1 else (logits > 0.0).squeeze(1).long()
+        loss = self.loss(logits, y_true if self.n_outputs > 1 else y_true.view((-1, 1)).type_as(x))
         acc = plm.accuracy(y_hat, y_true, num_classes=self.n_classes)
         prec = plm.precision(y_hat, y_true, num_classes=self.n_classes)
         rec = plm.recall(y_hat, y_true, num_classes=self.n_classes)
         f1 = plm.f1_score(y_hat, y_true, num_classes=self.n_classes)
-        conf_matrix = plm.confusion_matrix(y_hat, y_true)
+        conf_matrix = plm.confusion_matrix(y_hat.long(), y_true.long())
 
         return (
             y_true,
@@ -559,7 +568,7 @@ class TransferLearningModel(pl.LightningModule):
 
         train_loss_mean = torch.stack([output['loss'] for output in outputs]).mean()
         train_acc_mean = torch.stack([output['train_acc'] for output in outputs]).mean()
-        print(f"\nTraining Epoch Loss: {train_loss_mean}, training epoch accuracy: {train_acc_mean}")
+        print(f"\nTraining Epoch Loss: {train_loss_mean:.4f}, training epoch accuracy: {train_acc_mean:.4f}")
 
         log = {
             'Train/epoch/acc': train_acc_mean,
@@ -655,8 +664,6 @@ class TransferLearningModel(pl.LightningModule):
         print(f"\nTest Epoch Loss: {loss:.4f}, training epoch accuracy: {acc:.4f}")
         print(f"Confusion matrix: \n{conf_matrix.int()}")
 
-        # TODO use one-cycle LR scheduler after unfreezing whole model
-        # TODO handle binary classification
         log = {
             'Test/epoch_loss': loss,
             'Test/epoch_acc': acc,
@@ -751,6 +758,12 @@ class TransferLearningModel(pl.LightningModule):
                             type=int,
                             help='Number of classes to classify',
                             dest='n_classes')
+        parser.add_argument('--num-outputs',
+                            default=7,
+                            type=int,
+                            help='Number of outputs from the final classification layer - '
+                                 'will determine if binary cross-entropy with logits or cross-entropy loss is used',
+                            dest='n_outputs')
         parser.add_argument('--folds',
                             default=5,
                             type=int,
@@ -800,6 +813,9 @@ def main(args: argparse.Namespace) -> None:
         to a temporary directory.
     """
 
+    # TODO handle incorrect n_classes/n_outputs
+    # TODO use one-cycle LR scheduler after unfreezing whole model
+
     print_system_info()
 
     print("Using following configuration: ")
@@ -828,6 +844,7 @@ def main(args: argparse.Namespace) -> None:
     test_targets = df_test.label
     test_dataset = CoralFragDataset(image_names=test_image_names,
                                     targets=test_targets,
+                                    binary=args.n_classes <= 2,
                                     root_dir=args.root_data_path,
                                     train=False,
                                     resize=resize_to,
@@ -849,6 +866,7 @@ def main(args: argparse.Namespace) -> None:
 
         train_dataset = CoralFragDataset(image_names=train_image_names,
                                          targets=train_targets,
+                                         binary=args.n_classes <= 2,
                                          root_dir=args.root_data_path,
                                          train=True,
                                          resize=resize_to,
@@ -856,6 +874,7 @@ def main(args: argparse.Namespace) -> None:
 
         val_dataset = CoralFragDataset(image_names=val_image_names,
                                        targets=val_targets,
+                                       binary=args.n_classes <= 2,
                                        root_dir=args.root_data_path,
                                        train=True,
                                        resize=resize_to,
@@ -899,7 +918,7 @@ def main(args: argparse.Namespace) -> None:
             benchmark=False,
             early_stop_callback=early_stop_callback,
             checkpoint_callback=checkpoint_callback,
-            fast_dev_run=True
+            # fast_dev_run=True
         )
 
         trainer.fit(model, train_dataloader=train_loader, val_dataloaders=val_loader)
