@@ -443,11 +443,9 @@ class TransferLearningModel(pl.LightningModule):
 
         with torch.no_grad():
             y_hat = torch.argmax(y_logits, dim=1)
-            same = y_hat == y_true
-            num_correct = same.int().sum()
-            acc = same.float().mean()
+            acc = plm.accuracy(y_hat, y_true, self.n_classes)
 
-        return loss, acc, num_correct
+        return loss, acc
 
     def __metrics_per_batch(self, batch):
         # 1. Forward pass:
@@ -539,16 +537,20 @@ class TransferLearningModel(pl.LightningModule):
                                           train_bn=self.train_bn)
 
     def training_step(self, batch, batch_idx):
-        train_loss, train_acc, num_correct = self.__step(batch)
+        train_loss, train_acc = self.__step(batch)
+        log = {
+            'Train/loss': train_loss,
+            'Train/acc': train_acc,
+            'Train/lr': self.trainer.optimizers[0].param_groups[0]['lr']
+        }
 
-        output = OrderedDict({'loss': train_loss,
-                              'num_correct': num_correct,
-                              'train_acc': train_acc,
-                              'log': {
-                                  'Train/loss': train_loss,
-                                  'Train/acc': train_acc,
-                                  'Train/lr': self.trainer.optimizers[0].param_groups[0]['lr']
-                              }})
+        output = OrderedDict(
+            {
+                'loss': train_loss,
+                'train_acc': train_acc,
+                'log': log
+            }
+        )
 
         return output
 
@@ -556,22 +558,31 @@ class TransferLearningModel(pl.LightningModule):
         """Compute and log training loss and accuracy at the epoch level."""
 
         train_loss_mean = torch.stack([output['loss'] for output in outputs]).mean()
-        sum_of_correct = torch.stack([output['num_correct'] for output in outputs]).sum().float()
-        train_acc_mean = sum_of_correct / (len(outputs) * self.batch_size)
-        print(f"Training Epoch Loss: {train_loss_mean}, training epoch accuracy: {train_acc_mean}")
+        train_acc_mean = torch.stack([output['train_acc'] for output in outputs]).mean()
+        print(f"\nTraining Epoch Loss: {train_loss_mean}, training epoch accuracy: {train_acc_mean}")
+
+        log = {
+            'Train/epoch/acc': train_acc_mean,
+            'Train/epoch/loss': train_loss_mean,
+            'Train/epoch/lr': self.trainer.optimizers[0].param_groups[0]['lr'],
+            'step': self.current_epoch
+        }
+
         return {
             'loss': train_loss_mean,
             'acc': train_acc_mean,
-            'log': {
-                'Train/epoch/acc': train_acc_mean,
-                'Train/epoch/loss': train_loss_mean,
-                'Train/epoch/lr': self.trainer.optimizers[0].param_groups[0]['lr'],
-                'step': self.current_epoch
-            }
+            'log': log
         }
 
     def validation_step(self, batch, batch_idx):
         y_true, y_hat, logits, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
+        log = {
+            'Validation/loss': loss,
+            'Validation/acc': acc,
+            'Validation/precision': prec,
+            'Validation/recall': rec,
+            'Validation/f1_score': f1,
+        }
 
         return {
             'loss': loss,
@@ -583,13 +594,7 @@ class TransferLearningModel(pl.LightningModule):
             'y_true': y_true,
             'y_logits': logits,
             'y_hat': y_hat,
-            'log': {
-                'Validation/loss': loss,
-                'Validation/acc': acc,
-                'Validation/precision': prec,
-                'Validation/recall': rec,
-                'Validation/f1_score': f1,
-            }
+            'log': log
         }
 
     def validation_epoch_end(self, outputs):
@@ -598,39 +603,46 @@ class TransferLearningModel(pl.LightningModule):
         self.__log_confusion_matrices(conf_matrix.cpu().numpy().astype('int'), "Validation")
 
         print(f"\nValidation Epoch Loss: {loss:.4f}, validation epoch accuracy: {acc:.4f}")
+
+        log = {
+            'Validation/loss/epoch': loss,
+            'Validation/acc/epoch': acc,
+            'step': self.current_epoch,
+            'Validation/precision/epoch': prec,
+            'Validation/recall/epoch': rec,
+            'Validation/f1_score/epoch': f1,
+        }
+
         return {
             'val_loss': loss,
             'val_acc': acc,
             'val_f1': f1,  # for saving the best model
-            'log': {
-                'Validation/loss/epoch': loss,
-                'Validation/acc/epoch': acc,
-                'step': self.current_epoch,
-                'Validation/precision/epoch': prec,
-                'Validation/recall/epoch': rec,
-                'Validation/f1_score/epoch': f1,
-            }
+            'log': log
         }
 
     def test_step(self, batch, batch_idx):
         y_true, y_hat, logits, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
 
-        output = OrderedDict({'loss': loss,
-                              'acc': acc,
-                              'precision': prec,
-                              'recall': rec,
-                              'f1_score': f1,
-                              'confusion_matrix': conf_matrix,
-                              'y_true': y_true,
-                              'y_logits': logits,
-                              'y_hat': y_hat,
-                              'log': {
-                                  'Test/loss': loss,
-                                  'Test/acc': acc,
-                                  'Test/precision': prec,
-                                  'Test/recall': rec,
-                                  'Test/f1_score': f1,
-                              }})
+        log = {
+            'Test/loss': loss,
+            'Test/acc': acc,
+            'Test/precision': prec,
+            'Test/recall': rec,
+            'Test/f1_score': f1,
+        }
+
+        output = {
+            'loss': loss,
+            'acc': acc,
+            'precision': prec,
+            'recall': rec,
+            'f1_score': f1,
+            'confusion_matrix': conf_matrix,
+            'y_true': y_true,
+            'y_logits': logits,
+            'y_hat': y_hat,
+            'log': log
+        }
 
         return output
 
@@ -644,17 +656,17 @@ class TransferLearningModel(pl.LightningModule):
         print(f"Confusion matrix: \n{conf_matrix.int()}")
 
         # TODO use one-cycle LR scheduler after unfreezing whole model
-        # TODO Save test results into DF
         # TODO handle binary classification
+        log = {
+            'Test/epoch_loss': loss,
+            'Test/epoch_acc': acc,
+            'Test/epoch_precision': prec,
+            'Test/epoch_recall': rec,
+            'Test/epoch_f1_score': f1,
+        }
 
         return {
-            'log': {
-                'Test/epoch_loss': loss,
-                'Test/epoch_acc': acc,
-                'Test/epoch_precision': prec,
-                'Test/epoch_recall': rec,
-                'Test/epoch_f1_score': f1,
-            }
+            'log': log
         }
 
     def configure_optimizers(self):
@@ -873,7 +885,8 @@ def main(args: argparse.Namespace) -> None:
             filepath=os.path.join(args.save_model_path, f"checkpoint-fold-{fold}" + "-{epoch:02d}-{val_f1:.2f}"),
             save_top_k=args.save_top_k,
             monitor="val_f1",
-            mode="max"
+            mode="max",
+            verbose=True
         )
         trainer = pl.Trainer(
             weights_summary=None,
@@ -886,12 +899,13 @@ def main(args: argparse.Namespace) -> None:
             benchmark=False,
             early_stop_callback=early_stop_callback,
             checkpoint_callback=checkpoint_callback,
-            # fast_dev_run=True
+            fast_dev_run=True
         )
 
         trainer.fit(model, train_dataloader=train_loader, val_dataloaders=val_loader)
+        print("-" * 80)
+        print(f"Testing the model on fold: {fold}")
         trainer.test(model, test_dataloaders=test_loader)
-        print(f"Fold {fold}: Training is DONE... Training on fold {fold} yielded following results:")
 
 
 def get_args() -> argparse.Namespace:

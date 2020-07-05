@@ -12,6 +12,8 @@ output_data_dir = "../datasets"
 CLASS_NAMES = os.listdir(data_dir)
 RANDOM_SEED = 42
 dirs = [os.path.join(data_dir, c) for c in CLASS_NAMES]
+n_splits = 5
+positive_class = "sps acropora"
 
 
 def build_img_dict():
@@ -24,20 +26,25 @@ def build_img_dict():
     return image_dict
 
 
-def build_data_frame(image_dict):
+def build_data_frame(image_dict, binary=False):
     print("Building Data Frame with images")
     output_df = pd.DataFrame()
     for i, cls in enumerate(CLASS_NAMES):
         df_lst = []
         for img_name in image_dict[cls]:
-            df_data = {
-                "image": img_name,
-                "label": i,
-                "text_label": cls
-            }
+            if binary:
+                df_data = {
+                    "image": img_name,
+                    "label": 1 if cls == positive_class else 0,
+                    "text_label": positive_class if cls == positive_class else "other"
+                }
 
-            for idx, c in enumerate(CLASS_NAMES):
-                df_data[c] = 1 if idx == i else 0
+            else:
+                df_data = {
+                    "image": img_name,
+                    "label": i,
+                    "text_label": cls
+                }
 
             df_lst.append(df_data)
 
@@ -54,7 +61,7 @@ def create_folds(frame_path):
     frame["kfold"] = -1
     new_frame = frame.sample(frac=1).reset_index(drop=True)
     y = new_frame.label.values
-    kf = model_selection.StratifiedKFold(n_splits=5)
+    kf = model_selection.StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_SEED)
 
     for f, (t_, v_) in enumerate(kf.split(X=new_frame, y=y)):
         print(f, t_, v_)
@@ -65,11 +72,11 @@ def create_folds(frame_path):
     return new_frame
 
 
-def move_data(train_df: pd.DataFrame, test_df):
+def move_data(train_df: pd.DataFrame, test_df, binary=False):
     print("Moving data to train and test folders")
     # make sure the dirs exist
-    train_dir = os.path.join(output_data_dir, "train")
-    test_dir = os.path.join(output_data_dir, "test")
+    train_dir = os.path.join(output_data_dir, "train" if binary else "train_binary")
+    test_dir = os.path.join(output_data_dir, "test" if binary else "test_binary")
     try:
         os.mkdir(train_dir)
         os.mkdir(test_dir)
@@ -97,19 +104,30 @@ def normalize_image_names_in_df(df):
     return df
 
 
-if __name__ == "__main__":
+def main(binary=False):
     d = build_img_dict()
-    df = build_data_frame(d)
+
+    df = build_data_frame(d, binary)
+
     X_train, X_test, y_train, y_test = model_selection.train_test_split(
         df,
         df.label.values,
         test_size=0.2,
         random_state=RANDOM_SEED
     )
-    X_train.to_csv(os.path.join(datasets_dir, "train.csv"), index=False)
-    df = create_folds(os.path.join(datasets_dir, "train.csv"))
-    #move_data(X_train, X_test)
+
+    X_train.to_csv(os.path.join(datasets_dir, "train_binary.csv" if binary else "train.csv"), index=False)
+
+    df = create_folds(os.path.join(datasets_dir, "train_binary.csv" if binary else "train.csv"))
+
+    move_data(X_train, X_test)
+
     X_train = normalize_image_names_in_df(df)
     X_test = normalize_image_names_in_df(X_test)
-    X_train.to_csv(os.path.join(datasets_dir, "train.csv"), index=False)
-    X_test.to_csv(os.path.join(datasets_dir, "test.csv"), index=False)
+
+    X_train.to_csv(os.path.join(datasets_dir, "train_binary.csv" if binary else "train.csv"), index=False)
+    X_test.to_csv(os.path.join(datasets_dir, "test_binary.csv" if binary else "test.csv"), index=False)
+
+
+if __name__ == "__main__":
+    main(binary=True)
