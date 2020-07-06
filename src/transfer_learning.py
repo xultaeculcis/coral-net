@@ -813,11 +813,22 @@ def main(args: argparse.Namespace) -> None:
         to a temporary directory.
     """
 
-    # TODO handle incorrect n_classes/n_outputs
+    if args.n_classes == 7 and args.n_outputs != 7:
+        raise ValueError(f"Invalid parameters passed to the module - for multiclass classification the number\n"
+                         f"of outputs must be the same as number of classes - you passed: "
+                         f"n_classes: {args.n_classes}, n_outputs {args.n_outputs}\n"
+                         f"This combination is invalid.")
+
+    if args.n_classes == 2 and args.n_outputs not in [1, 2]:
+        raise ValueError(f"Invalid parameters passed to the module - for binary classification the number\n"
+                         f"of outputs must be equal to either 2 (cross entropy loss is used)\n"
+                         f"or 1 (binary cross entropy with logits is used) - you passed: "
+                         f"n_classes: {args.n_classes}, n_outputs {args.n_outputs}\n"
+                         f"This combination is invalid.")
+
     # TODO use one-cycle LR scheduler after unfreezing whole model
 
     print_system_info()
-
     print("Using following configuration: ")
     pprint(args)
 
