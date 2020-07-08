@@ -18,10 +18,12 @@ Note:
 
 import argparse
 import itertools
+import numbers
 import os
+from abc import ABC, abstractmethod
 from collections import OrderedDict
 from pprint import pprint
-from typing import Optional, Generator
+from typing import Generator
 
 import albumentations
 import matplotlib.pyplot as plt
@@ -34,13 +36,12 @@ import torch.nn.functional as F
 from PIL import Image
 from PIL import ImageFile
 from pandas import DataFrame
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning import _logger as pl_log
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateLogger
 from pytorch_lightning.loggers import TensorBoardLogger
 from sklearn import model_selection
-from torch import optim
-from torch.nn import Module
-from torch.optim.lr_scheduler import MultiStepLR
-from torch.optim.optimizer import Optimizer
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models
 
@@ -53,6 +54,7 @@ std = (0.229, 0.224, 0.225)
 SEED = 42  # Answer to the Ultimate Question of Life, the Universe, and Everything
 
 
+#  --- Sampler  ----
 class ImbalancedDatasetSampler(torch.utils.data.sampler.Sampler):
     """
     Samples elements randomly from a given list of indices for imbalanced dataset
@@ -102,277 +104,53 @@ class ImbalancedDatasetSampler(torch.utils.data.sampler.Sampler):
         return self.num_samples
 
 
-#  --- Utility functions ---
-def print_system_info() -> None:
-    # If there's a GPU available...
-    if torch.cuda.is_available():
-        print('There are %d GPU(s) available.' % torch.cuda.device_count())
-        print('We will use the:', torch.cuda.get_device_name(0))
-        print('GPU capability:', torch.cuda.get_device_capability(0))
-        print('GPU properties:', torch.cuda.get_device_properties(0))
-    # If not...
-    else:
-        print('No GPU available, using the CPU instead.')
+#  --- Base Pytorch Lightning module ----
+class ParametersSplitsModuleMixin(pl.LightningModule, ABC):
+    @abstractmethod
+    def model_splits(self):
+        """ Split the model into high level groups
+        """
+        pass
 
+    def params_splits(self, only_trainable=False):
+        """ Get parameters from model splits
+        """
+        for split in self.model_splits():
+            params = list(filter_params(split, only_trainable=only_trainable))
+            if params:
+                yield params
 
-def _make_trainable(module: Module) -> None:
-    """Unfreezes a given module.
-    Args:
-        module: The module to unfreeze
-    """
-    for param in module.parameters():
-        param.requires_grad = True
-    module.train()
+    def trainable_params_splits(self):
+        """ Get trainable parameters from model splits
+            If a parameter group does not have trainable params, it does not get added
+        """
+        return self.params_splits(only_trainable=True)
 
+    def freeze_to(self, n: int = None):
+        """ Freezes model until certain layer
+        """
+        unfreeze(self.parameters())
+        for params in list(self.params_splits())[:n]:
+            freeze(params)
 
-def _recursive_freeze(module: Module,
-                      train_bn: bool = True) -> None:
-    """Freezes the layers of a given module.
-    Args:
-        module: The module to freeze
-        train_bn: If True, leave the BatchNorm layers in training mode
-    """
-    children = list(module.children())
-    if not children:
-        if not (isinstance(module, BN_TYPES) and train_bn):
-            for param in module.parameters():
-                param.requires_grad = False
-            module.eval()
-        else:
-            # Make the BN layers trainable
-            _make_trainable(module)
-    else:
-        for child in children:
-            _recursive_freeze(module=child, train_bn=train_bn)
-
-
-def freeze(module: Module,
-           n: Optional[int] = None,
-           train_bn: bool = True) -> None:
-    """Freezes the layers up to index n (if n is not None).
-    Args:
-        module: The module to freeze (at least partially)
-        n: Max depth at which we stop freezing the layers. If None, all
-            the layers of the given module will be frozen.
-        train_bn: If True, leave the BatchNorm layers in training mode
-    """
-    children = list(module.children())
-    n_max = len(children) if n is None else int(n)
-
-    for child in children[:n_max]:
-        _recursive_freeze(module=child, train_bn=train_bn)
-
-    for child in children[n_max:]:
-        _make_trainable(module=child)
-
-
-def filter_params(module: Module,
-                  train_bn: bool = True) -> Generator:
-    """Yields the trainable parameters of a given module.
-    Args:
-        module: A given module
-        train_bn: If True, leave the BatchNorm layers in training mode
-    Returns:
-        Generator
-    """
-    children = list(module.children())
-    if not children:
-        if not (isinstance(module, BN_TYPES) and train_bn):
-            for param in module.parameters():
-                if param.requires_grad:
-                    yield param
-    else:
-        for child in children:
-            for param in filter_params(module=child, train_bn=train_bn):
-                yield param
-
-
-def _unfreeze_and_add_param_group(module: Module,
-                                  optimizer: Optimizer,
-                                  lr: Optional[float] = None,
-                                  train_bn: bool = True):
-    """Unfreezes a module and adds its parameters to an optimizer."""
-    _make_trainable(module)
-    params_lr = optimizer.param_groups[0]['lr'] if lr is None else float(lr)
-    optimizer.add_param_group({
-        'params': filter_params(module=module, train_bn=train_bn),
-        'lr': params_lr / 10.
-    })
-
-
-def _plot_confusion_matrix(cm,
-                           target_names,
-                           title='Confusion matrix',
-                           cmap=None,
-                           normalize=True):
-    """
-    Given a confusion matrix (cm), make a nice plot.
-    Based on Scikit Learn's implementation.
-
-    Arguments
-    ---------
-    cm:           confusion matrix from sklearn.metrics.confusion_matrix
-
-    target_names: given classification classes such as [0, 1, 2]
-                  the class names, for example: ['high', 'medium', 'low']
-
-    title:        the text to display at the top of the matrix
-
-    cmap:         the gradient of the values displayed from matplotlib.pyplot.cm
-                  see http://matplotlib.org/examples/color/colormaps_reference.html
-                  plt.get_cmap('jet') or plt.cm.Blues
-
-    normalize:    If False, plot the raw numbers
-                  If True, plot the proportions
-    """
-
-    if cmap is None:
-        cmap = plt.get_cmap('Blues')
-
-    figure = plt.figure(figsize=(8, 6))
-    plt.imshow(cm, interpolation='nearest', cmap=cmap)
-    plt.title(title)
-    plt.colorbar()
-
-    if target_names is not None:
-        tick_marks = np.arange(len(target_names))
-        plt.xticks(tick_marks, target_names, rotation=45)
-        plt.yticks(tick_marks, target_names)
-
-    if normalize:
-        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
-
-    thresh = cm.max() / 1.5 if normalize else cm.max() / 2
-    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
-        if normalize:
-            plt.text(j, i, "{:0.2f}".format(cm[i, j]),
-                     horizontalalignment="center",
-                     color="white" if cm[i, j] > thresh else "black")
-        else:
-            plt.text(j, i, "{:,}".format(cm[i, j]),
-                     horizontalalignment="center",
-                     color="white" if cm[i, j] > thresh else "black")
-
-    plt.tight_layout()
-    plt.ylabel('True label')
-    plt.xlabel('Predicted label')
-
-    return figure
-
-
-def k_fold(df: DataFrame, k: int = 5):
-    print(f"Creating folds. k = {k}")
-    df["kfold"] = -1
-    new_frame = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
-    y = new_frame.label.values
-    kf = model_selection.StratifiedKFold(n_splits=k, shuffle=True, random_state=SEED)
-
-    for f, (t_, v_) in enumerate(kf.split(X=new_frame, y=y)):
-        new_frame.loc[v_, 'kfold'] = f
-
-    print(f"Created {k} folds for the cross validation")
-
-    return new_frame
-
-
-#  --- Dataset ----
-class CoralFragDataset(Dataset):
-    def __init__(self,
-                 image_names: list,
-                 targets: list,
-                 binary=False,
-                 root_dir: str = "./",
-                 train: bool = True,
-                 resize=None,
-                 augmentations=None):
-        self.image_names = image_names
-        self.targets = targets
-        self.root_dir = root_dir
-        self.train = train
-        self.resize = resize
-        self.augmentations = augmentations
-        self.binary = binary
-        self.classes = [
-            "Montipora",
-            "Other",
-            "Acropora",
-            "Zoa",
-            "Euphyllia",
-            "Chalice",
-            "Acanthastrea"
-        ] if not binary else [
-            "Other",
-            "Acropora"
+    def get_optimizer_param_groups(self, lr):
+        lrs = self.get_lrs(lr)
+        return [
+            {"params": params, "lr": lr}
+            for params, lr in zip(self.params_splits(), lrs)
         ]
-        self.class_lookup_by_name = dict([(c, i) for i, c in enumerate(self.classes)])
-        self.class_lookup_by_index = dict([(i, c) for i, c in enumerate(self.classes)])
 
-    def __len__(self):
-        return len(self.image_names)
-
-    def __getitem__(self, idx):
-        image_name = self.image_names[idx]
-        image_path = os.path.join(self.root_dir, "train" if self.train else "test", image_name)
-        image = Image.open(image_path)
-        targets = self.targets[idx]
-
-        if self.resize is not None:
-            image = image.resize(
-                (self.resize[1], self.resize[0]), resample=Image.BILINEAR
-            )
-
-        image = np.array(image)
-
-        if self.augmentations is not None:
-            augmented = self.augmentations(image=image)
-            image = augmented["image"]
-
-        image = np.transpose(image, (2, 0, 1)).astype(np.float32)
-        img_tensor = torch.tensor(image, dtype=torch.float)
-        target_tensor = torch.tensor(targets, dtype=torch.long)
-
-        return img_tensor, target_tensor
-
-    def label_for(self, idx):
-        return self.targets[idx]
-
-    def as_pillow(self, idx):
-        image_name = self.image_names[idx]
-        image_path = os.path.join(self.root_dir, "train" if self.train else "test", image_name)
-        image = Image.open(image_path)
-        targets = self.targets[idx]
-        return image, self.class_lookup_by_index[targets]
-
-    def plot_sample_batch(self):
-        fig, ax = plt.subplots(8, 4, figsize=(12, 20))
-        t = np.random.randint(0, self.__len__())
-        for i in range(8):
-            for j in range(4):
-                img, target = self.as_pillow(t)
-                ax[i, j].set_title(target)
-                ax[i, j].imshow(img)
-                t += 1
-
-        plt.show()
-
-
-def plot_single_batch(loader: DataLoader, dataset: CoralFragDataset) -> None:
-    batch = next(iter(loader))
-    fig, ax = plt.subplots(8, 4, figsize=(12, 20))
-    idx = 0
-    for i in range(8):
-        for j in range(4):
-            image = batch[0][idx].permute(1, 2, 0)
-            target = batch[1][idx].item()
-            ax[i, j].set_title(dataset.class_lookup_by_index[target])
-            ax[i, j].imshow(image)
-            idx += 1
-
-    plt.show()
+    def get_lrs(self, lr):
+        n_splits = len(list(self.params_splits()))
+        if isinstance(lr, numbers.Number):
+            return [lr] * n_splits
+        if isinstance(lr, (tuple, list)):
+            assert len(lr) == len(list(self.params_splits()))
+            return lr
 
 
 #  --- Pytorch-lightning module ---
-class TransferLearningModel(pl.LightningModule):
+class TransferLearningModel(ParametersSplitsModuleMixin):
     """Transfer Learning with pre-trained Model.
     Args:
         hparams: Model hyperparameters
@@ -380,18 +158,38 @@ class TransferLearningModel(pl.LightningModule):
     """
 
     def __init__(self,
+                 folds: int = 5,
                  fold: int = 0,
                  classes: list = None,
                  backbone: str = 'resnet18',
+                 root_data_path: str = './',
                  train_bn: bool = True,
-                 milestones: tuple = (5, 10),
-                 batch_size: int = 16,
-                 lr: float = 1e-3,
-                 lr_scheduler_gamma: float = 1e-1,
+                 batch_size: int = 32,
                  n_classes: int = 7,
                  n_outputs: int = 7,
-                 num_workers: int = 8, **kwargs) -> None:
+                 num_workers: int = 8,
+                 freeze_epochs: int = 2,
+                 freeze_lrs: tuple = (0, 1e-2),
+                 unfreeze_epochs: int = 4,
+                 unfreeze_lrs: tuple = (1e-5, 1e-3),
+                 weight_decay: float = 1e-4,
+                 train_csv: str = None,
+                 test_csv: str = None,
+                 **kwargs) -> None:
         super().__init__()
+
+        if n_classes == 7 and n_outputs != 7:
+            raise ValueError(f"Invalid parameters passed to the module - for multiclass classification the number\n"
+                             f"of outputs must be the same as number of classes - you passed: "
+                             f"n_classes: {n_classes}, n_outputs {n_outputs}\n"
+                             f"This combination is invalid.")
+
+        if n_classes == 2 and n_outputs not in [1, 2]:
+            raise ValueError(f"Invalid parameters passed to the module - for binary classification the number\n"
+                             f"of outputs must be equal to either 2 (cross entropy loss is used)\n"
+                             f"or 1 (binary cross entropy with logits is used) - you passed: "
+                             f"n_classes: {n_classes}, n_outputs {n_outputs}\n"
+                             f"This combination is invalid.")
 
         self.supported_architectures = ['googlenet',
                                         'resnet18', 'resnet34', 'resnet50', 'resnet101',
@@ -404,16 +202,24 @@ class TransferLearningModel(pl.LightningModule):
 
         self.backbone = backbone
         self.train_bn = train_bn
-        self.milestones = milestones
         self.batch_size = batch_size
-        self.lr = lr
-        self.lr_scheduler_gamma = lr_scheduler_gamma
         self.n_classes = n_classes
         self.n_outputs = n_outputs
+        self.root_data_path = root_data_path
         self.classes = classes
         self.num_workers = num_workers
+        self.folds = folds
         self.fold = fold
+        self.freeze_epochs = freeze_epochs
+        self.freeze_lrs = freeze_lrs
+        self.unfreeze_epochs = unfreeze_epochs
+        self.unfreeze_lrs = unfreeze_lrs
+        self.weight_decay = weight_decay
+        self.train_csv = train_csv
+        self.test_csv = test_csv
         self.__build_model()
+        self.__setup()
+        self.classes = self.train_dataset.classes
 
     def __build_model(self):
         """Define model layers & loss."""
@@ -423,7 +229,6 @@ class TransferLearningModel(pl.LightningModule):
         backbone = model_func(pretrained=True)
         _layers = list(backbone.children())[:-1]
         self.feature_extractor = torch.nn.Sequential(*_layers)
-        freeze(module=self.feature_extractor, train_bn=self.train_bn)
 
         # 2. Classifier
         self.input_size = (224, 224) if self.backbone != 'googlenet' else (112, 112)
@@ -517,40 +322,50 @@ class TransferLearningModel(pl.LightningModule):
     def loss(self, logits, labels):
         return self.loss_func(input=logits, target=labels)
 
-    def train(self, mode=True):
-        super().train(mode=mode)
+    def model_splits(self):
+        return [self.feature_extractor, self.fc]
 
-        epoch = self.current_epoch
-        if epoch < self.milestones[0] and mode:
-            # feature extractor is frozen (except for BatchNorm layers)
-            freeze(module=self.feature_extractor,
-                   train_bn=self.train_bn)
-
-        elif self.milestones[0] <= epoch < self.milestones[1] and mode:
-            # Unfreeze last two layers of the feature extractor
-            freeze(module=self.feature_extractor,
-                   n=-2,
-                   train_bn=self.train_bn)
+    def configure_optimizers(self):
+        # passed lr does not matter, because scheduler will overtake
+        param_groups = self.get_optimizer_param_groups(0)
+        opt = AdamW(param_groups, weight_decay=self.weight_decay)
+        # return a dummy lr_scheduler, so LearningRateLogger doesn't complain
+        scheduler = OneCycleLR(opt, 0, 9)
+        return [opt], [scheduler]
 
     def on_epoch_start(self):
-        """Use `on_epoch_start` to unfreeze layers progressively."""
-        optimizer = self.trainer.optimizers[0]
-        if self.current_epoch == self.milestones[0]:
-            _unfreeze_and_add_param_group(module=self.feature_extractor[-2:],
-                                          optimizer=optimizer,
-                                          train_bn=self.train_bn)
+        if self.current_epoch == 0:
+            # Freeze all but last layer (imagine this is the head)
+            self.freeze_to(-1)
+            # Create new scheduler
+            total_steps = len(self.train_dataloader()) * self.freeze_epochs
+            lrs = self.get_lrs(self.freeze_lrs)
+            opt = self.trainer.optimizers[0]
+            scheduler = {'scheduler': OneCycleLR(opt, lrs, total_steps, pct_start=.9), 'interval': 'step'}
+            scheduler = self.trainer.configure_schedulers([scheduler])
+            # Replace scheduler and update lr logger
+            self.trainer.lr_schedulers = scheduler
+            lr_logger.on_train_start(self.trainer, self)
 
-        elif self.current_epoch == self.milestones[1]:
-            _unfreeze_and_add_param_group(module=self.feature_extractor[:-2],
-                                          optimizer=optimizer,
-                                          train_bn=self.train_bn)
+        if self.current_epoch == self.freeze_epochs:
+            # Unfreeze all layers, we can also use `unfreeze`, but `freeze_to` has the
+            # additional property of only considering parameters returned by `model_splits`
+            self.freeze_to(0)
+            # Create new scheduler
+            total_steps = len(self.train_dataloader()) * self.unfreeze_epochs
+            lrs = self.get_lrs(self.unfreeze_epochs)
+            opt = self.trainer.optimizers[0]
+            scheduler = {'scheduler': OneCycleLR(opt, lrs, total_steps, pct_start=.2), 'interval': 'step'}
+            scheduler = self.trainer.configure_schedulers([scheduler])
+            # Replace scheduler and update lr logger
+            self.trainer.lr_schedulers = scheduler
+            lr_logger.on_train_start(self.trainer, self)
 
     def training_step(self, batch, batch_idx):
         train_loss, train_acc = self.__step(batch)
         log = {
             'Train/loss': train_loss,
             'Train/acc': train_acc,
-            'Train/lr': self.trainer.optimizers[0].param_groups[0]['lr']
         }
 
         output = OrderedDict(
@@ -573,7 +388,6 @@ class TransferLearningModel(pl.LightningModule):
         log = {
             'Train/epoch/acc': train_acc_mean,
             'Train/epoch/loss': train_loss_mean,
-            'Train/epoch/lr': self.trainer.optimizers[0].param_groups[0]['lr'],
             'step': self.current_epoch
         }
 
@@ -585,13 +399,6 @@ class TransferLearningModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         y_true, y_hat, logits, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
-        log = {
-            'Validation/loss': loss,
-            'Validation/acc': acc,
-            'Validation/precision': prec,
-            'Validation/recall': rec,
-            'Validation/f1_score': f1,
-        }
 
         return {
             'loss': loss,
@@ -603,7 +410,6 @@ class TransferLearningModel(pl.LightningModule):
             'y_true': y_true,
             'y_logits': logits,
             'y_hat': y_hat,
-            'log': log
         }
 
     def validation_epoch_end(self, outputs):
@@ -632,14 +438,6 @@ class TransferLearningModel(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         y_true, y_hat, logits, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
 
-        log = {
-            'Test/loss': loss,
-            'Test/acc': acc,
-            'Test/precision': prec,
-            'Test/recall': rec,
-            'Test/f1_score': f1,
-        }
-
         output = {
             'loss': loss,
             'acc': acc,
@@ -650,7 +448,6 @@ class TransferLearningModel(pl.LightningModule):
             'y_true': y_true,
             'y_logits': logits,
             'y_hat': y_hat,
-            'log': log
         }
 
         return output
@@ -676,16 +473,90 @@ class TransferLearningModel(pl.LightningModule):
             'log': log
         }
 
-    def configure_optimizers(self):
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                      self.parameters()),
-                               lr=self.lr)
+    def train_dataloader(self) -> DataLoader:
+        pl_log.info('Training data loaded.')
+        return self.__dataloader(stage='train')
 
-        scheduler = MultiStepLR(optimizer,
-                                milestones=self.milestones,
-                                gamma=self.lr_scheduler_gamma)
+    def val_dataloader(self) -> DataLoader:
+        pl_log.info('Validation data loaded.')
+        return self.__dataloader(stage='validation')
 
-        return [optimizer], [scheduler]
+    def test_dataloader(self) -> DataLoader:
+        pl_log.info('Test data loaded.')
+        return self.__dataloader(stage='test')
+
+    def __setup(self):
+        df = pd.read_csv(self.train_csv)
+        df = k_fold(df, self.folds)
+        df_test = pd.read_csv(self.test_csv)
+
+        resize_to = [224, 224] if self.backbone != 'googlenet' else [112, 112]
+
+        train_aug = albumentations.Compose(
+            [
+                albumentations.Normalize(mean, std, max_pixel_value=255.0, always_apply=True),
+                albumentations.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15),
+                albumentations.Flip(p=0.5)
+            ]
+        )
+        valid_aug = albumentations.Compose(
+            [
+                albumentations.Normalize(mean, std, max_pixel_value=255.0, always_apply=True)
+            ]
+        )
+
+        test_image_names = df_test.image
+        test_targets = df_test.label
+        test_dataset = CoralFragDataset(image_names=test_image_names,
+                                        targets=test_targets,
+                                        binary=self.n_classes <= 2,
+                                        root_dir=self.root_data_path,
+                                        train=False,
+                                        resize=resize_to,
+                                        augmentations=valid_aug)
+
+        df_train = df[df["kfold"] != self.fold].reset_index(drop=True)
+        df_valid = df[df["kfold"] == self.fold].reset_index(drop=True)
+
+        train_image_names = df_train.image
+        val_image_names = df_valid.image
+
+        train_targets = df_train.label
+        val_targets = df_valid.label
+
+        train_dataset = CoralFragDataset(image_names=train_image_names,
+                                         targets=train_targets,
+                                         binary=self.n_classes <= 2,
+                                         root_dir=self.root_data_path,
+                                         train=True,
+                                         resize=resize_to,
+                                         augmentations=train_aug)
+
+        val_dataset = CoralFragDataset(image_names=val_image_names,
+                                       targets=val_targets,
+                                       binary=self.n_classes <= 2,
+                                       root_dir=self.root_data_path,
+                                       train=True,
+                                       resize=resize_to,
+                                       augmentations=valid_aug)
+
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        self.test_dataset = test_dataset
+
+    def __dataloader(self, stage='train'):
+        """Train/validation loaders."""
+
+        _dataset = self.train_dataset if stage == 'train' \
+            else self.val_dataset if stage == 'validation' \
+            else self.test_dataset
+
+        loader = DataLoader(dataset=_dataset,
+                            batch_size=self.batch_size,
+                            num_workers=self.num_workers,
+                            sampler=ImbalancedDatasetSampler(_dataset) if stage == 'train' else None)
+
+        return loader
 
     @staticmethod
     def __metrics_per_epoch(outputs):
@@ -718,12 +589,6 @@ class TransferLearningModel(pl.LightningModule):
                             type=str,
                             metavar='BK',
                             help='Name (as in ``torchvision.models``) of the feature extractor')
-        parser.add_argument('--epochs',
-                            default=2,
-                            type=int,
-                            metavar='N',
-                            help='Total number of epochs',
-                            dest='nb_epochs')
         parser.add_argument('--batch-size',
                             default=64,
                             type=int,
@@ -734,19 +599,13 @@ class TransferLearningModel(pl.LightningModule):
                             type=int,
                             default=1,
                             help='Number of GPUs to use')
-        parser.add_argument('--lr',
-                            '--learning-rate',
-                            default=1e-3,
+        parser.add_argument('--wd',
+                            '--weight-decay',
+                            default=1e-4,
                             type=float,
-                            metavar='LR',
-                            help='Initial learning rate',
-                            dest='lr')
-        parser.add_argument('--lr-scheduler-gamma',
-                            default=1e-1,
-                            type=float,
-                            metavar='LRG',
-                            help='Factor by which the learning rate is reduced at each milestone',
-                            dest='lr_scheduler_gamma')
+                            metavar='WD',
+                            help='The weight decay value for the AdamW optimizer',
+                            dest='weight_decay')
         parser.add_argument('--num-workers',
                             default=8,
                             type=int,
@@ -776,11 +635,26 @@ class TransferLearningModel(pl.LightningModule):
                             metavar='TB',
                             help='Whether the BatchNorm layers should be trainable',
                             dest='train_bn')
-        parser.add_argument('--milestones',
-                            default=[5, 10],
-                            type=list,
-                            metavar='M',
-                            help='List of two epochs milestones')
+        parser.add_argument('--freeze-epochs',
+                            default=2,
+                            type=int,
+                            dest='freeze_epochs',
+                            help='For how many epochs the feature extractor should be frozen')
+        parser.add_argument('--freeze-lrs',
+                            default=(0, 1e-2),
+                            type=tuple,
+                            dest='freeze_lrs',
+                            help='The min and max learning rate while feature extractor is frozen')
+        parser.add_argument('--unfreeze-epochs',
+                            default=4,
+                            type=int,
+                            dest='unfreeze_epochs',
+                            help='For how many epochs feature extractor should be trained together with the classifier')
+        parser.add_argument('--unfreeze-lrs',
+                            default=(1e-5, 1e-3),
+                            type=tuple,
+                            dest='unfreeze_lrs',
+                            help='The min and max learning rate after feature extractor is unfrozen')
         parser.add_argument('--train-csv',
                             default="../datasets/train.csv",
                             type=str,
@@ -804,6 +678,223 @@ class TransferLearningModel(pl.LightningModule):
         return parser
 
 
+#  --- Dataset ----
+class CoralFragDataset(Dataset):
+    def __init__(self,
+                 image_names: list,
+                 targets: list,
+                 binary=False,
+                 root_dir: str = "./",
+                 train: bool = True,
+                 resize=None,
+                 augmentations=None):
+        self.image_names = image_names
+        self.targets = targets
+        self.root_dir = root_dir
+        self.train = train
+        self.resize = resize
+        self.augmentations = augmentations
+        self.binary = binary
+        self.classes = [
+            "Montipora",
+            "Other",
+            "Acropora",
+            "Zoa",
+            "Euphyllia",
+            "Chalice",
+            "Acanthastrea"
+        ] if not binary else [
+            "Other",
+            "Acropora"
+        ]
+        self.class_lookup_by_name = dict([(c, i) for i, c in enumerate(self.classes)])
+        self.class_lookup_by_index = dict([(i, c) for i, c in enumerate(self.classes)])
+
+    def __len__(self):
+        return len(self.image_names)
+
+    def __getitem__(self, idx):
+        image_name = self.image_names[idx]
+        image_path = os.path.join(self.root_dir, "train" if self.train else "test", image_name)
+        image = Image.open(image_path)
+        targets = self.targets[idx]
+
+        if self.resize is not None:
+            image = image.resize(
+                (self.resize[1], self.resize[0]), resample=Image.BILINEAR
+            )
+
+        image = np.array(image)
+
+        if self.augmentations is not None:
+            augmented = self.augmentations(image=image)
+            image = augmented["image"]
+
+        image = np.transpose(image, (2, 0, 1)).astype(np.float32)
+        img_tensor = torch.tensor(image, dtype=torch.float)
+        target_tensor = torch.tensor(targets, dtype=torch.long)
+
+        return img_tensor, target_tensor
+
+    def label_for(self, idx):
+        return self.targets[idx]
+
+    def as_pillow(self, idx):
+        image_name = self.image_names[idx]
+        image_path = os.path.join(self.root_dir, "train" if self.train else "test", image_name)
+        image = Image.open(image_path)
+        targets = self.targets[idx]
+        return image, self.class_lookup_by_index[targets]
+
+    def plot_sample_batch(self):
+        fig, ax = plt.subplots(8, 4, figsize=(12, 20))
+        t = np.random.randint(0, self.__len__())
+        for i in range(8):
+            for j in range(4):
+                img, target = self.as_pillow(t)
+                ax[i, j].set_title(target)
+                ax[i, j].imshow(img)
+                t += 1
+
+        plt.show()
+
+
+def filter_params(module: torch.nn.Module, bn: bool = True, only_trainable=False) -> Generator:
+    """Yields the trainable parameters of a given module.
+
+    Args:
+        module: A given module
+        bn: If False, don't return batch norm layers
+        only_trainable: If True, get only trainable params
+
+    Returns:
+        Generator
+    """
+    children = list(module.children())
+    if not children:
+        if not isinstance(module, BN_TYPES) or bn:
+            for param in module.parameters():
+                if not only_trainable or param.requires_grad:
+                    yield param
+    else:
+        for child in children:
+            for param in filter_params(module=child, bn=bn, only_trainable=only_trainable):
+                yield param
+
+
+#  --- Utility functions ---
+def print_system_info() -> None:
+    # If there's a GPU available...
+    if torch.cuda.is_available():
+        print('There are %d GPU(s) available.' % torch.cuda.device_count())
+        print('We will use the:', torch.cuda.get_device_name(0))
+        print('GPU capability:', torch.cuda.get_device_capability(0))
+        print('GPU properties:', torch.cuda.get_device_properties(0))
+    # If not...
+    else:
+        print('No GPU available, using the CPU instead.')
+
+
+def unfreeze(params):
+    for p in params:
+        p.requires_grad = True
+
+
+def freeze(params):
+    for p in params:
+        p.requires_grad = False
+
+
+def _plot_confusion_matrix(cm,
+                           target_names,
+                           title='Confusion matrix',
+                           cmap=None,
+                           normalize=True):
+    """
+    Given a confusion matrix (cm), make a nice plot.
+    Based on Scikit Learn's implementation.
+
+    Arguments
+    ---------
+    cm:           confusion matrix from sklearn.metrics.confusion_matrix
+
+    target_names: given classification classes such as [0, 1, 2]
+                  the class names, for example: ['high', 'medium', 'low']
+
+    title:        the text to display at the top of the matrix
+
+    cmap:         the gradient of the values displayed from matplotlib.pyplot.cm
+                  see http://matplotlib.org/examples/color/colormaps_reference.html
+                  plt.get_cmap('jet') or plt.cm.Blues
+
+    normalize:    If False, plot the raw numbers
+                  If True, plot the proportions
+    """
+
+    if cmap is None:
+        cmap = plt.get_cmap('Blues')
+
+    figure = plt.figure(figsize=(8, 6))
+    plt.imshow(cm, interpolation='nearest', cmap=cmap)
+    plt.title(title)
+    plt.colorbar()
+
+    if target_names is not None:
+        tick_marks = np.arange(len(target_names))
+        plt.xticks(tick_marks, target_names, rotation=45)
+        plt.yticks(tick_marks, target_names)
+
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
+
+    thresh = cm.max() / 1.5 if normalize else cm.max() / 2
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        if normalize:
+            plt.text(j, i, "{:0.2f}".format(cm[i, j]),
+                     horizontalalignment="center",
+                     color="white" if cm[i, j] > thresh else "black")
+        else:
+            plt.text(j, i, "{:,}".format(cm[i, j]),
+                     horizontalalignment="center",
+                     color="white" if cm[i, j] > thresh else "black")
+
+    plt.tight_layout()
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
+
+    return figure
+
+
+def k_fold(df: DataFrame, k: int = 5):
+    print(f"Creating folds. k = {k}")
+    df["kfold"] = -1
+    new_frame = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
+    y = new_frame.label.values
+    kf = model_selection.StratifiedKFold(n_splits=k, shuffle=True, random_state=SEED)
+
+    for f, (t_, v_) in enumerate(kf.split(X=new_frame, y=y)):
+        new_frame.loc[v_, 'kfold'] = f
+
+    print(f"Created {k} folds for the cross validation")
+
+    return new_frame
+
+
+def plot_single_batch(loader: DataLoader, dataset: CoralFragDataset) -> None:
+    batch = next(iter(loader))
+    fig, ax = plt.subplots(8, 4, figsize=(12, 20))
+    idx = 0
+    for i in range(8):
+        for j in range(4):
+            image = batch[0][idx].permute(1, 2, 0)
+            target = batch[1][idx].item()
+            ax[i, j].set_title(dataset.class_lookup_by_index[target])
+            ax[i, j].imshow(image)
+            idx += 1
+
+    plt.show()
+
+
 def main(args: argparse.Namespace) -> None:
     """Train the model.
     Args:
@@ -813,97 +904,16 @@ def main(args: argparse.Namespace) -> None:
         to a temporary directory.
     """
 
-    if args.n_classes == 7 and args.n_outputs != 7:
-        raise ValueError(f"Invalid parameters passed to the module - for multiclass classification the number\n"
-                         f"of outputs must be the same as number of classes - you passed: "
-                         f"n_classes: {args.n_classes}, n_outputs {args.n_outputs}\n"
-                         f"This combination is invalid.")
-
-    if args.n_classes == 2 and args.n_outputs not in [1, 2]:
-        raise ValueError(f"Invalid parameters passed to the module - for binary classification the number\n"
-                         f"of outputs must be equal to either 2 (cross entropy loss is used)\n"
-                         f"or 1 (binary cross entropy with logits is used) - you passed: "
-                         f"n_classes: {args.n_classes}, n_outputs {args.n_outputs}\n"
-                         f"This combination is invalid.")
-
-    # TODO use one-cycle LR scheduler after unfreezing whole model
-
     print_system_info()
     print("Using following configuration: ")
     pprint(args)
 
-    resize_to = [224, 224] if args.backbone != 'googlenet' else [112, 112]
-
-    df = pd.read_csv(args.train_csv)
-    df = k_fold(df, args.folds)
-    df_test = pd.read_csv(args.test_csv)
-
-    train_aug = albumentations.Compose(
-        [
-            albumentations.Normalize(mean, std, max_pixel_value=255.0, always_apply=True),
-            albumentations.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15),
-            albumentations.Flip(p=0.5)
-        ]
-    )
-    valid_aug = albumentations.Compose(
-        [
-            albumentations.Normalize(mean, std, max_pixel_value=255.0, always_apply=True)
-        ]
-    )
-
-    test_image_names = df_test.image
-    test_targets = df_test.label
-    test_dataset = CoralFragDataset(image_names=test_image_names,
-                                    targets=test_targets,
-                                    binary=args.n_classes <= 2,
-                                    root_dir=args.root_data_path,
-                                    train=False,
-                                    resize=resize_to,
-                                    augmentations=valid_aug)
-    test_loader = DataLoader(dataset=test_dataset,
-                             batch_size=args.batch_size,
-                             shuffle=False,
-                             num_workers=args.num_workers)
-
     for fold in range(1):
-        df_train = df[df["kfold"] != fold].reset_index(drop=True)
-        df_valid = df[df["kfold"] == fold].reset_index(drop=True)
-
-        train_image_names = df_train.image
-        val_image_names = df_valid.image
-
-        train_targets = df_train.label
-        val_targets = df_valid.label
-
-        train_dataset = CoralFragDataset(image_names=train_image_names,
-                                         targets=train_targets,
-                                         binary=args.n_classes <= 2,
-                                         root_dir=args.root_data_path,
-                                         train=True,
-                                         resize=resize_to,
-                                         augmentations=train_aug)
-
-        val_dataset = CoralFragDataset(image_names=val_image_names,
-                                       targets=val_targets,
-                                       binary=args.n_classes <= 2,
-                                       root_dir=args.root_data_path,
-                                       train=True,
-                                       resize=resize_to,
-                                       augmentations=valid_aug)
-
-        train_loader = DataLoader(dataset=train_dataset,
-                                  batch_size=args.batch_size,
-                                  sampler=ImbalancedDatasetSampler(train_dataset),
-                                  num_workers=args.num_workers)
-
-        val_loader = torch.utils.data.DataLoader(dataset=val_dataset,
-                                                 batch_size=args.batch_size,
-                                                 shuffle=False,
-                                                 num_workers=args.num_workers)
-
         print(f"Fold {fold}: Training is starting...")
-        model = TransferLearningModel(fold=fold, classes=train_dataset.classes, **vars(args))
+        model = TransferLearningModel(fold=fold, **vars(args))
         logger = TensorBoardLogger("logs", name=f"{args.backbone}-fold-{fold}")
+
+        nb_epochs = args.freeze_epochs + args.unfreeze_epochs
         early_stop_callback = EarlyStopping(
             monitor='val_f1',
             min_delta=0.00,
@@ -922,20 +932,21 @@ def main(args: argparse.Namespace) -> None:
             weights_summary=None,
             num_sanity_val_steps=0,
             gpus=args.gpus,
-            min_epochs=args.nb_epochs,
-            max_epochs=args.nb_epochs,
+            min_epochs=nb_epochs,
+            max_epochs=nb_epochs,
             logger=logger,
             deterministic=True,
             benchmark=False,
             early_stop_callback=early_stop_callback,
             checkpoint_callback=checkpoint_callback,
+            callbacks=[lr_logger]
             # fast_dev_run=True
         )
 
-        trainer.fit(model, train_dataloader=train_loader, val_dataloaders=val_loader)
+        trainer.fit(model)
         print("-" * 80)
         print(f"Testing the model on fold: {fold}")
-        trainer.test(model, test_dataloaders=test_loader)
+        trainer.test(model)
 
 
 def get_args() -> argparse.Namespace:
@@ -953,5 +964,5 @@ def get_args() -> argparse.Namespace:
 if __name__ == '__main__':
     pl.seed_everything(seed=SEED)
     torch.manual_seed(SEED)
-
+    lr_logger = LearningRateLogger()
     main(get_args())
