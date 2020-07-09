@@ -18,12 +18,9 @@ Note:
 
 import argparse
 import itertools
-import numbers
 import os
-from abc import ABC, abstractmethod
 from collections import OrderedDict
 from pprint import pprint
-from typing import Generator
 
 import albumentations
 import matplotlib.pyplot as plt
@@ -104,53 +101,8 @@ class ImbalancedDatasetSampler(torch.utils.data.sampler.Sampler):
         return self.num_samples
 
 
-#  --- Base Pytorch Lightning module ----
-class ParametersSplitsModuleMixin(pl.LightningModule, ABC):
-    @abstractmethod
-    def model_splits(self):
-        """ Split the model into high level groups
-        """
-        pass
-
-    def params_splits(self, only_trainable=False):
-        """ Get parameters from model splits
-        """
-        for split in self.model_splits():
-            params = list(filter_params(split, only_trainable=only_trainable))
-            if params:
-                yield params
-
-    def trainable_params_splits(self):
-        """ Get trainable parameters from model splits
-            If a parameter group does not have trainable params, it does not get added
-        """
-        return self.params_splits(only_trainable=True)
-
-    def freeze_to(self, n: int = None):
-        """ Freezes model until certain layer
-        """
-        unfreeze(self.parameters())
-        for params in list(self.params_splits())[:n]:
-            freeze(params)
-
-    def get_optimizer_param_groups(self, lr):
-        lrs = self.get_lrs(lr)
-        return [
-            {"params": params, "lr": lr}
-            for params, lr in zip(self.params_splits(), lrs)
-        ]
-
-    def get_lrs(self, lr):
-        n_splits = len(list(self.params_splits()))
-        if isinstance(lr, numbers.Number):
-            return [lr] * n_splits
-        if isinstance(lr, (tuple, list)):
-            assert len(lr) == len(list(self.params_splits()))
-            return lr
-
-
 #  --- Pytorch-lightning module ---
-class TransferLearningModel(ParametersSplitsModuleMixin):
+class TransferLearningModel(pl.LightningModule):
     """Transfer Learning with pre-trained Model.
     Args:
         hparams: Model hyperparameters
@@ -328,38 +280,18 @@ class TransferLearningModel(ParametersSplitsModuleMixin):
     def configure_optimizers(self):
         # passed lr does not matter, because scheduler will overtake
         param_groups = self.get_optimizer_param_groups(0)
-        opt = AdamW(param_groups, weight_decay=self.weight_decay)
+        opt = AdamW(self.parameters(), weight_decay=self.weight_decay)
         # return a dummy lr_scheduler, so LearningRateLogger doesn't complain
-        scheduler = OneCycleLR(opt, 0, 9)
+        scheduler = OneCycleLR(opt,
+                               max_lr=1e-4,
+                               total_steps=len(self.train_dataloader()) * (self.unfreeze_epochs + self.freeze_epochs),
+                               pct_start=.3,
+                               div_factor=5,
+                               final_div_factor=1e2,
+                               base_momentum=0.85,
+                               max_momentum=0.95)
+        scheduler = {'scheduler': scheduler, 'interval': 'step'}
         return [opt], [scheduler]
-
-    def on_epoch_start(self):
-        if self.current_epoch == 0:
-            # Freeze all but last layer (imagine this is the head)
-            self.freeze_to(-1)
-            # Create new scheduler
-            total_steps = len(self.train_dataloader()) * self.freeze_epochs
-            lrs = self.get_lrs(self.freeze_lrs)
-            opt = self.trainer.optimizers[0]
-            scheduler = {'scheduler': OneCycleLR(opt, lrs, total_steps, pct_start=.9), 'interval': 'step'}
-            scheduler = self.trainer.configure_schedulers([scheduler])
-            # Replace scheduler and update lr logger
-            self.trainer.lr_schedulers = scheduler
-            lr_logger.on_train_start(self.trainer, self)
-
-        if self.current_epoch == self.freeze_epochs:
-            # Unfreeze all layers, we can also use `unfreeze`, but `freeze_to` has the
-            # additional property of only considering parameters returned by `model_splits`
-            self.freeze_to(0)
-            # Create new scheduler
-            total_steps = len(self.train_dataloader()) * self.unfreeze_epochs
-            lrs = self.get_lrs(self.unfreeze_epochs)
-            opt = self.trainer.optimizers[0]
-            scheduler = {'scheduler': OneCycleLR(opt, lrs, total_steps, pct_start=.2), 'interval': 'step'}
-            scheduler = self.trainer.configure_schedulers([scheduler])
-            # Replace scheduler and update lr logger
-            self.trainer.lr_schedulers = scheduler
-            lr_logger.on_train_start(self.trainer, self)
 
     def training_step(self, batch, batch_idx):
         train_loss, train_acc = self.__step(batch)
@@ -458,7 +390,7 @@ class TransferLearningModel(ParametersSplitsModuleMixin):
 
         self.__log_confusion_matrices(conf_matrix.cpu().numpy().astype('int'), "Test")
 
-        print(f"\nTest Epoch Loss: {loss:.4f}, training epoch accuracy: {acc:.4f}")
+        print(f"\nTest Epoch Loss: {loss:.4f}, test epoch accuracy: {acc:.4f}")
         print(f"Confusion matrix: \n{conf_matrix.int()}")
 
         log = {
@@ -585,12 +517,13 @@ class TransferLearningModel(ParametersSplitsModuleMixin):
     def add_model_specific_args(parent_parser):
         parser = argparse.ArgumentParser(parents=[parent_parser])
         parser.add_argument('--backbone',
+                            # default='resnext50_32x4d',
                             default='resnet18',
                             type=str,
                             metavar='BK',
                             help='Name (as in ``torchvision.models``) of the feature extractor')
         parser.add_argument('--batch-size',
-                            default=64,
+                            default=48,
                             type=int,
                             metavar='B',
                             help='Batch size',
@@ -759,29 +692,6 @@ class CoralFragDataset(Dataset):
         plt.show()
 
 
-def filter_params(module: torch.nn.Module, bn: bool = True, only_trainable=False) -> Generator:
-    """Yields the trainable parameters of a given module.
-
-    Args:
-        module: A given module
-        bn: If False, don't return batch norm layers
-        only_trainable: If True, get only trainable params
-
-    Returns:
-        Generator
-    """
-    children = list(module.children())
-    if not children:
-        if not isinstance(module, BN_TYPES) or bn:
-            for param in module.parameters():
-                if not only_trainable or param.requires_grad:
-                    yield param
-    else:
-        for child in children:
-            for param in filter_params(module=child, bn=bn, only_trainable=only_trainable):
-                yield param
-
-
 #  --- Utility functions ---
 def print_system_info() -> None:
     # If there's a GPU available...
@@ -793,16 +703,6 @@ def print_system_info() -> None:
     # If not...
     else:
         print('No GPU available, using the CPU instead.')
-
-
-def unfreeze(params):
-    for p in params:
-        p.requires_grad = True
-
-
-def freeze(params):
-    for p in params:
-        p.requires_grad = False
 
 
 def _plot_confusion_matrix(cm,
@@ -922,7 +822,8 @@ def main(args: argparse.Namespace) -> None:
             mode='max'
         )
         checkpoint_callback = ModelCheckpoint(
-            filepath=os.path.join(args.save_model_path, f"checkpoint-fold-{fold}" + "-{epoch:02d}-{val_f1:.2f}"),
+            filepath=os.path.join(args.save_model_path,
+                                  f"checkpoint-{args.backbone}-fold-{fold}" + "-{epoch:02d}-{val_f1:.2f}"),
             save_top_k=args.save_top_k,
             monitor="val_f1",
             mode="max",
