@@ -123,13 +123,7 @@ class TransferLearningModel(pl.LightningModule):
         # 2. Classifier
         self.input_size = (224, 224) if self.backbone != 'googlenet' else (112, 112)
         _n_inputs = backbone.fc.in_features
-        _fc_layers = [torch.nn.Linear(_n_inputs, 256),
-                      torch.nn.ReLU(),
-                      torch.nn.Dropout(),
-                      torch.nn.Linear(256, 32),
-                      torch.nn.ReLU(),
-                      torch.nn.Dropout(),
-                      torch.nn.Linear(32, self.n_outputs)]
+        _fc_layers = [torch.nn.Linear(_n_inputs, self.n_outputs)]
         self.fc = torch.nn.Sequential(*_fc_layers)
 
         # 3. Loss:
