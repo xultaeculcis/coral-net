@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from typing import Dict
 
 import albumentations
 import pandas as pd
@@ -25,75 +26,55 @@ class TransferLearningModel(pl.LightningModule):
     """Transfer Learning with pre-trained Model.
     Args:
         hparams: Model hyperparameters
-        dl_path: Path where the data will be downloaded
     """
 
-    def __init__(self,
-                 folds: int = 5,
-                 fold: int = 0,
-                 classes: list = None,
-                 backbone: str = 'resnet18',
-                 root_data_path: str = './',
-                 train_bn: bool = True,
-                 batch_size: int = 256,
-                 n_classes: int = 7,
-                 n_outputs: int = 7,
-                 num_workers: int = 8,
-                 freeze_epochs: int = 2,
-                 freeze_lrs: tuple = (0, 1e-2),
-                 unfreeze_epochs: int = 4,
-                 unfreeze_lrs: tuple = (1e-5, 1e-3),
-                 weight_decay: float = 1e-4,
-                 train_csv: str = None,
-                 test_csv: str = None,
-                 seed=42,
-                 max_lr=1e-4,
-                 pct_start=.3,
-                 div_factor=5,
-                 final_div_factor=1e2,
-                 base_momentum=0.85,
-                 max_momentum=0.95,
-                 **kwargs) -> None:
+    def __init__(self, hparams) -> None:
         super().__init__()
 
         self.supported_architectures = ['googlenet',
-                                        'resnet18', 'resnet34', 'resnet50', 'resnet101',
-                                        'resnet152', 'resnext50_32x4d', 'resnext101_32x8d',
+                                        'resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152',
+                                        'resnext50_32x4d', 'resnext101_32x8d',
                                         'wide_resnet50_2', 'wide_resnet101_2']
 
-        self.__validate_args(backbone, n_classes, n_outputs)
+        self.__validate_args(hparams.backbone, hparams.n_classes, hparams.n_outputs)
+        self.hparams = hparams
 
-        self.backbone = backbone
-        self.train_bn = train_bn
-        self.batch_size = batch_size
-        self.n_classes = n_classes
-        self.n_outputs = n_outputs
-        self.is_binary = n_outputs <= 2
-        self.root_data_path = root_data_path
-        self.num_workers = num_workers
-        self.folds = folds
-        self.fold_number = fold
-        self.seed = seed
-        self.freeze_epochs = freeze_epochs
-        self.freeze_lrs = freeze_lrs
-        self.unfreeze_epochs = unfreeze_epochs
-        self.unfreeze_lrs = unfreeze_lrs
-        self.weight_decay = weight_decay
-        self.train_csv = train_csv
-        self.test_csv = test_csv
+        self.backbone = hparams.backbone
+        self.train_bn = hparams.train_bn
+        self.batch_size = hparams.batch_size
+        self.n_classes = hparams.n_classes
+        self.n_outputs = hparams.n_outputs
+        self.is_binary = hparams.n_outputs <= 2
+        self.root_data_path = hparams.root_data_path
+        self.num_workers = hparams.num_workers
+        self.folds = hparams.folds
+        self.fold_number = hparams.fold
+        self.seed = hparams.seed
+        self.freeze_epochs = hparams.freeze_epochs
+        self.freeze_lrs = hparams.freeze_lrs
+        self.unfreeze_epochs = hparams.unfreeze_epochs
+        self.unfreeze_lrs = hparams.unfreeze_lrs
+        self.weight_decay = hparams.weight_decay
+        self.train_csv = hparams.train_csv
+        self.test_csv = hparams.test_csv
+        self.max_lr = hparams.max_lr
+        self.pct_start = hparams.pct_start
+        self.div_factor = hparams.div_factor
+        self.final_div_factor = hparams.final_div_factor
+        self.base_momentum = hparams.base_momentum
+        self.max_momentum = hparams.max_momentum
+
         self.__build_model()
         self.__setup()
+
         self.classes = self.train_dataset.classes
         self.train_loader = self.__dataloader(stage='train')
         self.val_loader = self.__dataloader(stage='validation')
         self.test_loader = self.__dataloader(stage='test')
-        self.max_lr = max_lr
-        self.pct_start = pct_start
-        self.div_factor = div_factor
-        self.final_div_factor = final_div_factor
-        self.base_momentum = base_momentum
-        self.max_momentum = max_momentum
         self.total_steps = len(self.train_dataloader()) * (self.unfreeze_epochs + self.freeze_epochs)
+        self.best_val_f1 = 0.0
+        self.best_val_loss = 99999999.99
+        self.best_val_acc = 0.0
 
     def __validate_args(self, backbone, n_classes, n_outputs):
         if n_classes == 7 and n_outputs != 7:
@@ -109,7 +90,7 @@ class TransferLearningModel(pl.LightningModule):
                              f"This combination is invalid.")
         if backbone not in self.supported_architectures:
             raise Exception(f"The '{backbone}' is currently not supported as a backbone. "
-                            f"Supported architectures are: {self.supported_architectures}")
+                            f"Supported architectures are: {', '.join(self.supported_architectures)}")
 
     def __build_model(self):
         """Define model layers & loss."""
@@ -136,12 +117,10 @@ class TransferLearningModel(pl.LightningModule):
 
         # 2. Compute loss & accuracy:
         loss = self.loss(y_logits, y if self.n_outputs > 1 else y.view((-1, 1)).type_as(x))
+        y_hat = torch.argmax(y_logits, dim=1) if self.n_outputs > 1 else (y_logits >= 0.0).squeeze(1).long()
+        num_correct = torch.eq(y_hat, y.view(-1)).sum()
 
-        with torch.no_grad():
-            y_hat = torch.argmax(y_logits, dim=1) if self.n_outputs > 1 else (y_logits >= 0.0).squeeze(1).long()
-            acc = plm.accuracy(y_hat, y, self.n_classes)
-
-        return loss, acc
+        return loss, num_correct
 
     def __metrics_per_batch(self, batch):
         # 1. Forward pass:
@@ -153,7 +132,8 @@ class TransferLearningModel(pl.LightningModule):
         # if multiclass then simply run argmax to find the index of the most confident class
         y_hat = torch.argmax(logits, dim=1) if self.n_outputs > 1 else (logits > 0.0).squeeze(1).long()
         loss = self.loss(logits, y_true if self.n_outputs > 1 else y_true.view((-1, 1)).type_as(x))
-        acc = plm.accuracy(y_hat, y_true, num_classes=self.n_classes)
+        num_correct = torch.eq(y_hat, y_true.view(-1)).sum()
+        acc = num_correct.float() / self.batch_size
         prec = plm.precision(y_hat, y_true, num_classes=self.n_classes)
         rec = plm.recall(y_hat, y_true, num_classes=self.n_classes)
         f1 = plm.f1_score(y_hat, y_true, num_classes=self.n_classes)
@@ -164,6 +144,7 @@ class TransferLearningModel(pl.LightningModule):
             y_hat,
             logits,
             loss,
+            num_correct,
             acc,
             prec,
             rec,
@@ -298,16 +279,19 @@ class TransferLearningModel(pl.LightningModule):
         return [opt], [scheduler]
 
     def training_step(self, batch, batch_idx):
-        train_loss, train_acc = self.__step(batch)
+        train_loss, num_correct = self.__step(batch)
+        train_acc = num_correct.float() / self.batch_size
         log = {
             'Train/loss': train_loss,
             'Train/acc': train_acc,
+            'Train/num_correct': num_correct
         }
 
         output = OrderedDict(
             {
                 'loss': train_loss,
                 'train_acc': train_acc,
+                'num_correct': num_correct,
                 'log': log
             }
         )
@@ -318,7 +302,9 @@ class TransferLearningModel(pl.LightningModule):
         """Compute and log training loss and accuracy at the epoch level."""
 
         train_loss_mean = torch.stack([output['loss'] for output in outputs]).mean()
-        train_acc_mean = torch.stack([output['train_acc'] for output in outputs]).mean()
+        train_acc_mean = torch.stack([output['num_correct'] for output in outputs]).sum().float()
+        train_acc_mean /= (len(outputs) * self.batch_size)
+
         print(f"\nTraining Epoch Loss: {train_loss_mean:.4f}, training epoch accuracy: {train_acc_mean:.4f}")
 
         log = {
@@ -334,10 +320,11 @@ class TransferLearningModel(pl.LightningModule):
         }
 
     def validation_step(self, batch, batch_idx):
-        y_true, y_hat, logits, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
+        y_true, y_hat, logits, loss, num_correct, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
 
         return {
             'loss': loss,
+            'num_correct': num_correct,
             'acc': acc,
             'precision': prec,
             'recall': rec,
@@ -350,13 +337,14 @@ class TransferLearningModel(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
         """Compute and log validation loss and accuracy at the epoch level."""
-        y_true, y_hat, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_epoch(outputs)
+        y_true, y_hat, loss, num_correct, acc, prec, rec, f1, conf_matrix = self.__metrics_per_epoch(outputs)
         self.__log_confusion_matrices(conf_matrix.cpu().numpy().astype('int'), "Validation")
 
         print(f"\nValidation Epoch Loss: {loss:.4f}, validation epoch accuracy: {acc:.4f}")
 
         log = {
             'Validation/loss/epoch': loss,
+            'Validation/num_correct/epoch': num_correct,
             'Validation/acc/epoch': acc,
             'step': self.current_epoch,
             'Validation/precision/epoch': prec,
@@ -372,10 +360,11 @@ class TransferLearningModel(pl.LightningModule):
         }
 
     def test_step(self, batch, batch_idx):
-        y_true, y_hat, logits, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
+        y_true, y_hat, logits, loss, num_correct, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
 
         output = {
             'loss': loss,
+            'num_correct': num_correct,
             'acc': acc,
             'precision': prec,
             'recall': rec,
@@ -390,7 +379,7 @@ class TransferLearningModel(pl.LightningModule):
 
     def test_epoch_end(self, outputs):
         """Compute and log test loss and accuracy at the epoch level."""
-        y_true, y_hat, loss, acc, prec, rec, f1, conf_matrix = self.__metrics_per_epoch(outputs)
+        y_true, y_hat, loss, num_correct, acc, prec, rec, f1, conf_matrix = self.__metrics_per_epoch(outputs)
 
         self.__log_confusion_matrices(conf_matrix.cpu().numpy().astype('int'), "Test")
 
@@ -404,6 +393,13 @@ class TransferLearningModel(pl.LightningModule):
             'Test/epoch_recall': rec,
             'Test/epoch_f1_score': f1,
         }
+
+        self.logger.experiment.add_graph(
+            self,
+            torch.rand(self.batch_size, 3, self.input_size[0], self.input_size[1]).to(self.device)
+        )
+
+        self.logger.experiment.flush()
 
         return {
             'log': log
@@ -420,6 +416,7 @@ class TransferLearningModel(pl.LightningModule):
 
     @staticmethod
     def __metrics_per_epoch(outputs):
+        num_correct = torch.stack([output['num_correct'] for output in outputs]).sum()
         loss_mean = torch.stack([output['loss'] for output in outputs]).mean()
         acc_mean = torch.stack([output['acc'] for output in outputs]).mean()
         prec_mean = torch.stack([output['precision'] for output in outputs]).mean()
@@ -434,6 +431,7 @@ class TransferLearningModel(pl.LightningModule):
             y_true,
             y_hat,
             loss_mean,
+            num_correct,
             acc_mean,
             prec_mean,
             rec_mean,

@@ -13,8 +13,8 @@ import pytorch_lightning as pl
 import torch
 from PIL import ImageFile
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateLogger
-from pytorch_lightning.loggers import TensorBoardLogger
 
+from src.hparams_metrics_logger import HparamsMetricsTensorBoardLogger
 from src.pl_module import TransferLearningModel
 from src.utils import print_system_info
 
@@ -31,7 +31,7 @@ def add_model_specific_args(parent_parser):
                         metavar='BK',
                         help='Name (as in ``torchvision.models``) of the feature extractor')
     parser.add_argument('--batch-size',
-                        default=48,
+                        default=128,
                         type=int,
                         metavar='B',
                         help='Batch size',
@@ -77,7 +77,7 @@ def add_model_specific_args(parent_parser):
                         help='Whether the BatchNorm layers should be trainable',
                         dest='train_bn')
     parser.add_argument('--freeze-epochs',
-                        default=2,
+                        default=1,
                         type=int,
                         dest='freeze_epochs',
                         help='For how many epochs the feature extractor should be frozen')
@@ -87,7 +87,7 @@ def add_model_specific_args(parent_parser):
                         dest='freeze_lrs',
                         help='The min and max learning rate while feature extractor is frozen')
     parser.add_argument('--unfreeze-epochs',
-                        default=4,
+                        default=1,
                         type=int,
                         dest='unfreeze_epochs',
                         help='For how many epochs feature extractor should be trained together with the classifier')
@@ -161,6 +161,11 @@ def add_model_specific_args(parent_parser):
                         type=int,
                         help='How many best k models to save',
                         dest='save_top_k')
+    parser.add_argument('--precision',
+                        default=16,
+                        type=int,
+                        help='Training precision - 16 bit by default',
+                        dest='precision')
     return parser
 
 
@@ -175,12 +180,13 @@ def main(arguments: argparse.Namespace) -> None:
 
     print_system_info()
     print("Using following configuration: ")
-    pprint(arguments)
+    pprint(vars(arguments))
 
     for fold in range(1):
         print(f"Fold {fold}: Training is starting...")
-        model = TransferLearningModel(fold=fold, **vars(arguments))
-        logger = TensorBoardLogger("logs", name=f"{arguments.backbone}-fold-{fold}")
+        arguments.fold = fold
+        model = TransferLearningModel(arguments)
+        logger = HparamsMetricsTensorBoardLogger("logs", name=f"{arguments.backbone}-fold-{fold}")
 
         nb_epochs = arguments.freeze_epochs + arguments.unfreeze_epochs
         early_stop_callback = EarlyStopping(
@@ -209,11 +215,16 @@ def main(arguments: argparse.Namespace) -> None:
             benchmark=False,
             early_stop_callback=early_stop_callback,
             checkpoint_callback=checkpoint_callback,
-            callbacks=[lr_logger]
+            callbacks=[lr_logger],
+            precision=arguments.precision,
             # fast_dev_run=True
         )
 
         trainer.fit(model)
+
+        logger.log_hyperparams_metrics(vars(arguments), {"hparams/val_f1": checkpoint_callback.best_model_score.item()})
+        logger.save()
+
         print("-" * 80)
         print(f"Testing the model on fold: {fold}")
         trainer.test(model)
