@@ -244,3 +244,6 @@ datasets/
 *.pth
 model-weights/
 src/apex/
+lightning_logs/
+cifar10/
+mnist/

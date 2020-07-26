@@ -50,10 +50,7 @@ class TransferLearningModel(pl.LightningModule):
         self.folds = hparams.folds
         self.fold_number = hparams.fold
         self.seed = hparams.seed
-        self.freeze_epochs = hparams.freeze_epochs
-        self.freeze_lrs = hparams.freeze_lrs
-        self.unfreeze_epochs = hparams.unfreeze_epochs
-        self.unfreeze_lrs = hparams.unfreeze_lrs
+        self.epochs = hparams.epochs
         self.weight_decay = hparams.weight_decay
         self.train_csv = hparams.train_csv
         self.test_csv = hparams.test_csv
@@ -71,10 +68,7 @@ class TransferLearningModel(pl.LightningModule):
         self.train_loader = self.__dataloader(stage='train')
         self.val_loader = self.__dataloader(stage='validation')
         self.test_loader = self.__dataloader(stage='test')
-        self.total_steps = len(self.train_dataloader()) * (self.unfreeze_epochs + self.freeze_epochs)
-        self.best_val_f1 = 0.0
-        self.best_val_loss = 99999999.99
-        self.best_val_acc = 0.0
+        self.total_steps = len(self.train_dataloader()) * self.epochs
 
     def __validate_args(self, backbone, n_classes, n_outputs):
         if n_classes == 7 and n_outputs != 7:

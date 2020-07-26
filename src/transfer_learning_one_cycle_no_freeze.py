@@ -13,8 +13,8 @@ import pytorch_lightning as pl
 import torch
 from PIL import ImageFile
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateLogger
+from pytorch_lightning.loggers import TensorBoardLogger
 
-from src.hparams_metrics_logger import HparamsMetricsTensorBoardLogger
 from src.pl_module import TransferLearningModel
 from src.utils import print_system_info
 
@@ -81,6 +81,11 @@ def add_model_specific_args(parent_parser):
                         type=int,
                         dest='freeze_epochs',
                         help='For how many epochs the feature extractor should be frozen')
+    parser.add_argument('--epochs',
+                        default=2,
+                        type=int,
+                        dest='epochs',
+                        help='For how many epochs the model should be trained')
     parser.add_argument('--freeze-lrs',
                         default=(0, 1e-2),
                         type=tuple,
@@ -186,9 +191,8 @@ def main(arguments: argparse.Namespace) -> None:
         print(f"Fold {fold}: Training is starting...")
         arguments.fold = fold
         model = TransferLearningModel(arguments)
-        logger = HparamsMetricsTensorBoardLogger("logs", name=f"{arguments.backbone}-fold-{fold}")
+        logger = TensorBoardLogger("logs", name=f"{arguments.backbone}-fold-{fold}")
 
-        nb_epochs = arguments.freeze_epochs + arguments.unfreeze_epochs
         early_stop_callback = EarlyStopping(
             monitor='val_f1',
             min_delta=0.00,
@@ -208,8 +212,8 @@ def main(arguments: argparse.Namespace) -> None:
             weights_summary=None,
             num_sanity_val_steps=0,
             gpus=arguments.gpus,
-            min_epochs=nb_epochs,
-            max_epochs=nb_epochs,
+            min_epochs=arguments.epochs,
+            max_epochs=arguments.epochs,
             logger=logger,
             deterministic=True,
             benchmark=False,
@@ -222,7 +226,7 @@ def main(arguments: argparse.Namespace) -> None:
 
         trainer.fit(model)
 
-        logger.log_hyperparams_metrics(vars(arguments), {"hparams/val_f1": checkpoint_callback.best_model_score.item()})
+        logger.log_hyperparams(arguments, {"hparams/val_f1": checkpoint_callback.best_model_score.item()})
         logger.save()
 
         print("-" * 80)
