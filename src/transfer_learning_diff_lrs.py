@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
+from pl_examples import LightningTemplateModel
 from pytorch_lightning import _logger as log
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
@@ -16,8 +17,8 @@ from torchvision.datasets import CIFAR10
 
 # Copied from pl_examples (with small changes)
 BN_TYPES = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)
-FREEZE_LR = (0, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3)
-UNFREEZE_LR = (1e-5, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4)
+FREEZE_LR = (0, 0, 0, 0, 0, 1e-3)
+UNFREEZE_LR = (1e-7, 1e-6, 1e-5, 1e-5, 1e-4, 1e-4)
 FREEZE_EPOCHS = 2
 UNFREEZE_EPOCHS = 4
 
@@ -92,12 +93,9 @@ class ParametersSplitsModuleMixin(pl.LightningModule, ABC):
 
     def get_lrs(self, lr):
         n_splits = len(list(self.params_splits()))
-        print(f"N_SPLITS:{n_splits}")
         if isinstance(lr, numbers.Number):
             return [lr] * n_splits
         if isinstance(lr, (tuple, list)):
-            print(f"N_LR:{len(lr)}")
-
             assert len(lr) == len(list(self.params_splits()))
             return lr
 
@@ -110,7 +108,9 @@ class MyModel(ParametersSplitsModuleMixin):
         self.model = models.resnet18(pretrained=True)
         _n_inputs = self.model.fc.in_features
         _n_outputs = 10
-        _fc_layers = [torch.nn.Linear(_n_inputs, _n_outputs)]
+        # 2. Classifier:
+        _fc_layers = [torch.nn.Linear(_n_inputs, 256),
+                      torch.nn.Linear(256, 10)]
         self.model.fc = torch.nn.Sequential(*_fc_layers)
 
         self.hparams = hparams
@@ -121,10 +121,6 @@ class MyModel(ParametersSplitsModuleMixin):
         groups = [nn.Sequential(self.model.conv1, self.model.bn1)]
         groups += [layer for name, layer in self.model.named_children() if name.startswith("layer")]
         groups += [self.model.fc]  # Considering we already switched the head
-
-        if not self.printed:
-            print(groups)
-            self.printed = True
 
         return groups
 
@@ -137,11 +133,11 @@ class MyModel(ParametersSplitsModuleMixin):
         return [opt], [sched]
 
     def on_epoch_start(self):
-        if self.current_epoch == 0:
+        if self.current_epoch == 1:
             # Freeze all but last layer (imagine this is the head)
             self.freeze_to(-1)
             # Create new scheduler
-            total_steps = len(model.train_dataloader()) * FREEZE_EPOCHS
+            total_steps = len(model.train_dataloader()) * (FREEZE_EPOCHS - 1)
             lrs = self.get_lrs(FREEZE_LR)
             opt = self.trainer.optimizers[0]
             sched = {'scheduler': OneCycleLR(opt, lrs, total_steps, pct_start=.9), 'interval': 'step'}
@@ -155,7 +151,7 @@ class MyModel(ParametersSplitsModuleMixin):
             # additional property of only considering parameters returned by `model_splits`
             self.freeze_to(0)
             # Create new scheduler
-            total_steps = len(model.train_dataloader()) * UNFREEZE_EPOCHS
+            total_steps = len(model.train_dataloader()) * (UNFREEZE_EPOCHS + 1)
             lrs = self.get_lrs(UNFREEZE_LR)
             opt = self.trainer.optimizers[0]
             sched = {'scheduler': OneCycleLR(opt, lrs, total_steps, pct_start=.2), 'interval': 'step'}
@@ -278,7 +274,7 @@ class MyModel(ParametersSplitsModuleMixin):
 
 # HACK: Have to define `lr_logger` globally because we're calling `lr_logger.on_train_start` inside `model.on_epoch_start`
 lr_logger = pl.callbacks.LearningRateLogger()
-model = MyModel({"batch_size": 128})
+model = MyModel({"batch_size": 64})
 
 max_epochs = FREEZE_EPOCHS + UNFREEZE_EPOCHS
 trainer = pl.Trainer(max_epochs=max_epochs, gpus=1, callbacks=[lr_logger])
