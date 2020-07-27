@@ -22,7 +22,7 @@ std = (0.229, 0.224, 0.225)
 
 
 #  --- Pytorch-lightning module ---
-class TransferLearningModel(pl.LightningModule):
+class OneCycleModule(pl.LightningModule):
     """Transfer Learning with pre-trained Model.
     Args:
         hparams: Model hyperparameters
@@ -31,8 +31,7 @@ class TransferLearningModel(pl.LightningModule):
     def __init__(self, hparams) -> None:
         super().__init__()
 
-        self.supported_architectures = ['googlenet',
-                                        'resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152',
+        self.supported_architectures = ['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152',
                                         'resnext50_32x4d', 'resnext101_32x8d',
                                         'wide_resnet50_2', 'wide_resnet101_2']
 

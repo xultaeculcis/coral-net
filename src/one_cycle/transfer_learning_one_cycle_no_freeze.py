@@ -15,7 +15,7 @@ from PIL import ImageFile
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateLogger
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from src.pl_module import TransferLearningModel
+from src.one_cycle.one_cycle_module import OneCycleModule
 from src.utils import print_system_info
 
 BN_TYPES = (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)
@@ -25,13 +25,13 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 def add_model_specific_args(parent_parser):
     parser = argparse.ArgumentParser(parents=[parent_parser])
     parser.add_argument('--backbone',
-                        # default='resnext50_32x4d',
-                        default='resnet18',
+                        default='resnext50_32x4d',
+                        # default='resnet18',
                         type=str,
                         metavar='BK',
                         help='Name (as in ``torchvision.models``) of the feature extractor')
     parser.add_argument('--batch-size',
-                        default=128,
+                        default=64,
                         type=int,
                         metavar='B',
                         help='Batch size',
@@ -82,30 +82,10 @@ def add_model_specific_args(parent_parser):
                         dest='freeze_epochs',
                         help='For how many epochs the feature extractor should be frozen')
     parser.add_argument('--epochs',
-                        default=2,
+                        default=6,
                         type=int,
                         dest='epochs',
                         help='For how many epochs the model should be trained')
-    parser.add_argument('--freeze-lrs',
-                        default=(0, 1e-2),
-                        type=tuple,
-                        dest='freeze_lrs',
-                        help='The min and max learning rate while feature extractor is frozen')
-    parser.add_argument('--unfreeze-epochs',
-                        default=1,
-                        type=int,
-                        dest='unfreeze_epochs',
-                        help='For how many epochs feature extractor should be trained together with the classifier')
-    parser.add_argument('--unfreeze-lrs',
-                        default=(1e-5, 1e-3),
-                        type=tuple,
-                        dest='unfreeze_lrs',
-                        help='The min and max learning rate after feature extractor is unfrozen')
-    parser.add_argument('--milestones',
-                        default=(2, 4),
-                        type=tuple,
-                        dest='milestones',
-                        help='The milestones (in epochs) after which the next layers should be unfrozen')
     parser.add_argument('--seed',
                         default=42,
                         type=int,
@@ -147,17 +127,17 @@ def add_model_specific_args(parent_parser):
                              'is cycled inversely to learning rate; at the start of a cycle, momentum is '
                              '‘max_momentum’ and learning rate is ‘base_lr’ ')
     parser.add_argument('--train-csv',
-                        default="../datasets/train.csv",
+                        default="../../datasets/train.csv",
                         type=str,
                         help='Path to train csv file',
                         dest='train_csv')
     parser.add_argument('--test-csv',
-                        default="../datasets/test.csv",
+                        default="../../datasets/test.csv",
                         type=str,
                         help='Path to test csv file',
                         dest='test_csv')
     parser.add_argument('--save-model-path',
-                        default="../model-weights",
+                        default="../../model-weights",
                         type=str,
                         help='Where to save the best model checkpoints',
                         dest='save_model_path')
@@ -190,8 +170,8 @@ def main(arguments: argparse.Namespace) -> None:
     for fold in range(1):
         print(f"Fold {fold}: Training is starting...")
         arguments.fold = fold
-        model = TransferLearningModel(arguments)
-        logger = TensorBoardLogger("logs", name=f"{arguments.backbone}-fold-{fold}")
+        model = OneCycleModule(arguments)
+        logger = TensorBoardLogger("../logs", name=f"{arguments.backbone}-fold-{fold}")
 
         early_stop_callback = EarlyStopping(
             monitor='val_f1',
@@ -239,7 +219,7 @@ def get_args() -> argparse.Namespace:
     parent_parser.add_argument('--root-data-path',
                                metavar='DIR',
                                type=str,
-                               default="../datasets",
+                               default="../../datasets",
                                help='Root directory where to download the data',
                                dest='root_data_path')
     parser = add_model_specific_args(parent_parser)
