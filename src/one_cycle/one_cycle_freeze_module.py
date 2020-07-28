@@ -1,5 +1,7 @@
+import numbers
+from abc import ABC, abstractmethod
 from collections import OrderedDict
-from typing import Dict
+from typing import Generator
 
 import albumentations
 import pandas as pd
@@ -7,10 +9,11 @@ import pytorch_lightning as pl
 import pytorch_lightning.metrics.functional as plm
 import torch
 import torch.nn.functional as F
+import torchvision.models as models
+from torch import nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
-from torchvision import models
 
 from src.dataset import CoralFragDataset
 from src.imbalanced_dataset_sampler import ImbalancedDatasetSampler
@@ -19,16 +22,94 @@ from src.utils import _plot_confusion_matrix, k_fold
 # imagenet normalization
 mean = (0.485, 0.456, 0.406)
 std = (0.229, 0.224, 0.225)
+BN_TYPES = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)
+
+
+def filter_params(module: nn.Module, bn: bool = True, only_trainable=False) -> Generator:
+    """
+    Yields the trainable parameters of a given module.
+    """
+    children = list(module.children())
+    if not children:
+        if not isinstance(module, BN_TYPES) or bn:
+            for param in module.parameters():
+                if not only_trainable or param.requires_grad:
+                    yield param
+    else:
+        for child in children:
+            for param in filter_params(module=child, bn=bn, only_trainable=only_trainable):
+                yield param
+
+
+def unfreeze(params):
+    for p in params:
+        p.requires_grad = True
+
+
+def freeze(params):
+    for p in params:
+        p.requires_grad = False
+
+
+class ParametersSplitsModule(pl.LightningModule, ABC):
+    printed = False
+
+    @abstractmethod
+    def model_splits(self):
+        """
+        Split the model into high level groups
+        """
+        pass
+
+    def params_splits(self, only_trainable=False):
+        """
+        Get parameters from model splits
+        """
+        for split in self.model_splits():
+            params = list(filter_params(split, only_trainable=only_trainable))
+            if params:
+                yield params
+
+    def trainable_params_splits(self):
+        """
+        Get trainable parameters from model splits
+        If a parameter group does not have trainable params, it does not get added
+        """
+        return self.params_splits(only_trainable=True)
+
+    def freeze_to(self, n: int = None):
+        """
+        Freezes model until certain layer
+        """
+        unfreeze(self.parameters())
+        for params in list(self.params_splits())[:n]:
+            freeze(params)
+
+    def get_optimizer_param_groups(self, lr):
+        lrs = self.get_lrs(lr)
+        return [
+            {"params": params, "lr": lr}
+            for params, lr in zip(self.params_splits(), lrs)
+        ]
+
+    def get_lrs(self, lr):
+        n_splits = len(list(self.params_splits()))
+        if isinstance(lr, numbers.Number):
+            return [lr] * n_splits
+        if isinstance(lr, (tuple, list)):
+            print(f"LRs: {len(lr)}, ParamSplits: {len(list(self.params_splits()))}")
+            assert len(lr) == len(list(self.params_splits()))
+            return lr
 
 
 #  --- Pytorch-lightning module ---
-class OneCycleModule(pl.LightningModule):
+class OneCycleWithFreezeModule(ParametersSplitsModule):
     """Transfer Learning with pre-trained Model.
     Args:
         hparams: Model hyperparameters
     """
 
-    def __init__(self, hparams) -> None:
+    def __init__(self, hparams, milestones) -> None:
         super().__init__()
 
         self.supported_architectures = ['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152',
@@ -53,12 +134,12 @@ class OneCycleModule(pl.LightningModule):
         self.weight_decay = hparams.weight_decay
         self.train_csv = hparams.train_csv
         self.test_csv = hparams.test_csv
-        self.max_lr = hparams.max_lr
-        self.pct_start = hparams.pct_start
         self.div_factor = hparams.div_factor
         self.final_div_factor = hparams.final_div_factor
         self.base_momentum = hparams.base_momentum
         self.max_momentum = hparams.max_momentum
+        self.milestones = milestones
+        self.input_size = (224, 224)
 
         self.__build_model()
         self.__setup()
@@ -95,9 +176,14 @@ class OneCycleModule(pl.LightningModule):
         self.feature_extractor = torch.nn.Sequential(*_layers)
 
         # 2. Classifier
-        self.input_size = (224, 224) if self.backbone != 'googlenet' else (112, 112)
         _n_inputs = backbone.fc.in_features
-        _fc_layers = [torch.nn.Linear(_n_inputs, self.n_outputs)]
+        _fc_layers = [torch.nn.Linear(_n_inputs, 256),
+                      torch.nn.ReLU(),
+                      torch.nn.Dropout(),
+                      torch.nn.Linear(256, 32),
+                      torch.nn.ReLU(),
+                      torch.nn.Dropout(),
+                      torch.nn.Linear(32, self.n_classes)]
         self.fc = torch.nn.Sequential(*_fc_layers)
 
         # 3. Loss:
@@ -171,7 +257,7 @@ class OneCycleModule(pl.LightningModule):
         df = k_fold(df, self.folds, self.seed)
         df_test = pd.read_csv(self.test_csv)
 
-        resize_to = [224, 224] if self.backbone != 'googlenet' else [112, 112]
+        resize_to = [224, 224]
 
         train_aug = albumentations.Compose(
             [
@@ -250,6 +336,7 @@ class OneCycleModule(pl.LightningModule):
 
         return x
 
+
     def loss(self, logits, labels):
         return self.loss_func(input=logits, target=labels)
 
@@ -258,18 +345,40 @@ class OneCycleModule(pl.LightningModule):
 
     def configure_optimizers(self):
         # passed lr does not matter, because scheduler will overtake
-        opt = AdamW(self.parameters(), weight_decay=self.weight_decay)
+        param_groups = self.get_optimizer_param_groups(0)
+        opt = AdamW(param_groups, weight_decay=self.weight_decay)
         # return a dummy lr_scheduler, so LearningRateLogger doesn't complain
-        scheduler = OneCycleLR(opt,
-                               max_lr=self.max_lr,
-                               total_steps=self.total_steps,
-                               pct_start=self.pct_start,
-                               div_factor=self.div_factor,
-                               final_div_factor=self.final_div_factor,
-                               base_momentum=self.base_momentum,
-                               max_momentum=self.max_momentum)
-        scheduler = {'scheduler': scheduler, 'interval': 'step'}
-        return [opt], [scheduler]
+        sched = OneCycleLR(opt, 0, 9)
+        return [opt], [sched]
+
+    def on_epoch_start(self):
+        if self.current_epoch in self.milestones.keys():
+            milestone_config = self.milestones[self.current_epoch]
+            # Unfreeze all layers, we can also use `unfreeze`, but `freeze_to` has the
+            # additional property of only considering parameters returned by `model_splits`
+            self.freeze_to(milestone_config['freeze_to'])
+
+            # Create new scheduler
+            total_steps = len(self.train_dataloader()) * milestone_config['duration']
+            lrs = self.get_lrs(milestone_config['lrs'])
+            opt = self.trainer.optimizers[0]
+            sched = {
+                'scheduler': OneCycleLR(
+                    opt,
+                    lrs,
+                    total_steps,
+                    pct_start=milestone_config['pct_start'],
+                    div_factor=self.div_factor,
+                    final_div_factor=self.final_div_factor,
+                    base_momentum=self.base_momentum,
+                    max_momentum=self.max_momentum
+                ),
+                'interval': 'step'
+            }
+            scheds = self.trainer.configure_schedulers([sched])
+            # Replace scheduler and update lr logger
+            self.trainer.lr_schedulers = scheds
+            # lr_logger.on_train_start(self.trainer, self)
 
     def training_step(self, batch, batch_idx):
         train_loss, num_correct = self.__step(batch)

@@ -59,6 +59,7 @@ class OneCycleModule(pl.LightningModule):
         self.final_div_factor = hparams.final_div_factor
         self.base_momentum = hparams.base_momentum
         self.max_momentum = hparams.max_momentum
+        self.input_size = (224, 224)
 
         self.__build_model()
         self.__setup()
@@ -95,7 +96,6 @@ class OneCycleModule(pl.LightningModule):
         self.feature_extractor = torch.nn.Sequential(*_layers)
 
         # 2. Classifier
-        self.input_size = (224, 224) if self.backbone != 'googlenet' else (112, 112)
         _n_inputs = backbone.fc.in_features
         _fc_layers = [torch.nn.Linear(_n_inputs, self.n_outputs)]
         self.fc = torch.nn.Sequential(*_fc_layers)
@@ -171,7 +171,7 @@ class OneCycleModule(pl.LightningModule):
         df = k_fold(df, self.folds, self.seed)
         df_test = pd.read_csv(self.test_csv)
 
-        resize_to = [224, 224] if self.backbone != 'googlenet' else [112, 112]
+        resize_to = [224, 224]
 
         train_aug = albumentations.Compose(
             [

@@ -15,10 +15,9 @@ from PIL import ImageFile
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateLogger
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from src.transfer_learning.transfer_learning_module import TransferLearningModule
+from src.one_cycle.one_cycle_freeze_module import OneCycleWithFreezeModule
 from src.utils import print_system_info
 
-BN_TYPES = (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
@@ -40,6 +39,13 @@ def add_model_specific_args(parent_parser):
                         type=int,
                         default=1,
                         help='Number of GPUs to use')
+    parser.add_argument('--wd',
+                        '--weight-decay',
+                        default=1e-4,
+                        type=float,
+                        metavar='WD',
+                        help='The weight decay value for the AdamW optimizer',
+                        dest='weight_decay')
     parser.add_argument('--num-workers',
                         default=8,
                         type=int,
@@ -63,35 +69,47 @@ def add_model_specific_args(parent_parser):
                         metavar='F',
                         help='Number of folds in k-Fold Cross Validation',
                         dest='folds')
-    parser.add_argument('--lr',
-                        '--learning-rate',
-                        default=1e-3,
-                        type=float,
-                        metavar='LR',
-                        help='initial learning rate',
-                        dest='lr')
-    parser.add_argument('--lr-scheduler-gamma',
-                        default=1e-1,
-                        type=float,
-                        metavar='LRG',
-                        help='Factor by which the learning rate is reduced at each milestone',
-                        dest='lr_scheduler_gamma')
     parser.add_argument('--train-bn',
                         default=True,
                         type=bool,
                         metavar='TB',
                         help='Whether the BatchNorm layers should be trainable',
                         dest='train_bn')
-    parser.add_argument('--epochs',
-                        default=6,
-                        type=int,
-                        dest='epochs',
-                        help='For how many epochs the model should be trained')
     parser.add_argument('--seed',
                         default=42,
                         type=int,
                         dest='seed',
                         help='The random seed for the reproducibility purposes')
+    parser.add_argument('--div-factor',
+                        default=10,
+                        type=float,
+                        dest='div_factor',
+                        help='Determines the initial learning rate via initial_lr = max_lr/div_factor')
+    parser.add_argument('--pct-start',
+                        default=.3,
+                        type=float,
+                        dest='pct_start',
+                        help='The percentage of the cycle (in number of steps) spent increasing the learning rate')
+    parser.add_argument('--final-div-factor',
+                        default=1e2,
+                        type=float,
+                        dest='final_div_factor',
+                        help='Determines the minimum learning rate via min_lr = initial_lr/final_div_factor')
+    parser.add_argument('--base-momentum',
+                        default=0.85,
+                        type=float,
+                        dest='base_momentum',
+                        help='Lower momentum boundaries in the cycle for each parameter group. Note that momentum'
+                             ' is cycled inversely to learning rate; at the peak of a cycle,'
+                             ' momentum is ‘base_momentum’ and learning rate is ‘max_lr’.')
+    parser.add_argument('--max-momentum',
+                        default=0.95,
+                        type=float,
+                        dest='max_momentum',
+                        help='Upper momentum boundaries in the cycle for each parameter group. Functionally,'
+                             ' it defines the cycle amplitude (max_momentum - base_momentum). Note that momentum '
+                             'is cycled inversely to learning rate; at the start of a cycle, momentum is '
+                             '‘max_momentum’ and learning rate is ‘base_lr’ ')
     parser.add_argument('--train-csv',
                         default="../../datasets/train.csv",
                         type=str,
@@ -117,11 +135,6 @@ def add_model_specific_args(parent_parser):
                         type=int,
                         help='Training precision - 16 bit by default',
                         dest='precision')
-    parser.add_argument('--milestones',
-                        default=[2, 4],
-                        type=list,
-                        metavar='M',
-                        help='List of two epochs milestones')
     return parser
 
 
@@ -138,10 +151,29 @@ def main(arguments: argparse.Namespace) -> None:
     print("Using following configuration: ")
     pprint(vars(arguments))
 
+    milestones = {
+        1: {
+
+            'freeze_to': -1,
+            'duration': 2,
+            'pct_start': .7,
+            'lrs': [.0, 1e-4]
+        },
+        3: {
+            'freeze_to': 0,
+            'duration': 4,
+            'pct_start': .6,
+            'lrs': [1e-4, 1e-4]
+        }
+    }
+
+    epochs = sum([milestone_config['duration'] for milestone_config in milestones.values()])
+    arguments.epochs = epochs
+
     for fold in range(1):
         print(f"Fold {fold}: Training is starting...")
         arguments.fold = fold
-        model = TransferLearningModule(arguments)
+        model = OneCycleWithFreezeModule(arguments, milestones)
         logger = TensorBoardLogger("../logs", name=f"{arguments.backbone}-fold-{fold}")
 
         early_stop_callback = EarlyStopping(
@@ -170,6 +202,7 @@ def main(arguments: argparse.Namespace) -> None:
             benchmark=False,
             early_stop_callback=early_stop_callback,
             checkpoint_callback=checkpoint_callback,
+            callbacks=[lr_logger],
             precision=arguments.precision,
             # fast_dev_run=True
         )
@@ -200,4 +233,5 @@ if __name__ == '__main__':
     args = get_args()
     pl.seed_everything(seed=args.seed)
     torch.manual_seed(args.seed)
+    lr_logger = LearningRateLogger()
     main(args)

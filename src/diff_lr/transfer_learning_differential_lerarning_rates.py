@@ -86,11 +86,6 @@ def add_model_specific_args(parent_parser):
                         type=float,
                         dest='div_factor',
                         help='Determines the initial learning rate via initial_lr = max_lr/div_factor')
-    parser.add_argument('--pct-start',
-                        default=.3,
-                        type=float,
-                        dest='pct_start',
-                        help='The percentage of the cycle (in number of steps) spent increasing the learning rate')
     parser.add_argument('--final-div-factor',
                         default=1e2,
                         type=float,
@@ -191,9 +186,6 @@ def main(arguments: argparse.Namespace) -> None:
             'lrs': [1e-5, 1e-5, 1e-5, 1e-5, 1e-5, 5e-5]
         },
     }
-
-    arguments.milestones = milestones.keys()
-    arguments.milestone_configs = milestones.values()
 
     epochs = sum([milestone_config['duration'] for milestone_config in milestones.values()])
     arguments.epochs = epochs

@@ -1,7 +1,7 @@
 import numbers
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from typing import Dict, Generator
+from typing import Generator
 
 import albumentations
 import pandas as pd
@@ -9,16 +9,14 @@ import pytorch_lightning as pl
 import pytorch_lightning.metrics.functional as plm
 import torch
 import torch.nn.functional as F
+import torchvision.models as models
 from torch import nn
-from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
-from torchvision import models
 
 from src.dataset import CoralFragDataset
 from src.imbalanced_dataset_sampler import ImbalancedDatasetSampler
 from src.utils import _plot_confusion_matrix, k_fold
-import torchvision.models as models
 
 # imagenet normalization
 mean = (0.485, 0.456, 0.406)
@@ -134,7 +132,6 @@ class DifferentialLearningRatesModule(ParametersSplitsModule):
         self.weight_decay = hparams.weight_decay
         self.train_csv = hparams.train_csv
         self.test_csv = hparams.test_csv
-        self.pct_start = hparams.pct_start
         self.div_factor = hparams.div_factor
         self.final_div_factor = hparams.final_div_factor
         self.base_momentum = hparams.base_momentum
@@ -249,7 +246,7 @@ class DifferentialLearningRatesModule(ParametersSplitsModule):
         df = k_fold(df, self.folds, self.seed)
         df_test = pd.read_csv(self.test_csv)
 
-        resize_to = [224, 224] if self.backbone != 'googlenet' else [112, 112]
+        resize_to = [224, 224]
 
         train_aug = albumentations.Compose(
             [

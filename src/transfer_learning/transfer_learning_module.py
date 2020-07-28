@@ -103,10 +103,10 @@ def _unfreeze_and_add_param_group(module: Module,
     """Unfreezes a module and adds its parameters to an optimizer."""
     _make_trainable(module)
     params_lr = optimizer.param_groups[0]['lr'] if lr is None else float(lr)
-    optimizer.add_param_group(
-        {'params': filter_params(module=module, train_bn=train_bn),
-         'lr': params_lr / 10.,
-         })
+    optimizer.add_param_group({
+        'params': filter_params(module=module, train_bn=train_bn),
+        'lr': params_lr / 10.
+    })
 
 
 #  --- Pytorch-lightning module ---
@@ -143,6 +143,7 @@ class TransferLearningModule(pl.LightningModule):
         self.lr = hparams.lr
         self.lr_scheduler_gamma = hparams.lr_scheduler_gamma
         self.milestones = hparams.milestones
+        self.input_size = (224, 224)
 
         self.__build_model()
         self.__setup()
@@ -179,9 +180,14 @@ class TransferLearningModule(pl.LightningModule):
         freeze(module=self.feature_extractor, train_bn=self.train_bn)
 
         # 2. Classifier
-        self.input_size = (224, 224) if self.backbone != 'googlenet' else (112, 112)
         _n_inputs = backbone.fc.in_features
-        _fc_layers = [torch.nn.Linear(_n_inputs, self.n_outputs)]
+        _fc_layers = [torch.nn.Linear(_n_inputs, 256),
+                      torch.nn.ReLU(),
+                      torch.nn.Dropout(),
+                      torch.nn.Linear(256, 32),
+                      torch.nn.ReLU(),
+                      torch.nn.Dropout(),
+                      torch.nn.Linear(32, self.n_classes)]
         self.fc = torch.nn.Sequential(*_fc_layers)
 
         # 3. Loss:
@@ -255,7 +261,7 @@ class TransferLearningModule(pl.LightningModule):
         df = k_fold(df, self.folds, self.seed)
         df_test = pd.read_csv(self.test_csv)
 
-        resize_to = [224, 224] if self.backbone != 'googlenet' else [112, 112]
+        resize_to = [224, 224]
 
         train_aug = albumentations.Compose(
             [
@@ -337,9 +343,6 @@ class TransferLearningModule(pl.LightningModule):
     def loss(self, logits, labels):
         return self.loss_func(input=logits, target=labels)
 
-    def model_splits(self):
-        return [self.feature_extractor, self.fc]
-
     def train(self, mode=True):
         super().train(mode=mode)
 
@@ -385,7 +388,8 @@ class TransferLearningModule(pl.LightningModule):
         log = {
             'Train/loss': train_loss,
             'Train/acc': train_acc,
-            'Train/num_correct': num_correct
+            'Train/num_correct': num_correct,
+            'Train/lr': self.trainer.optimizers[0].param_groups[0]['lr']
         }
 
         output = OrderedDict(
