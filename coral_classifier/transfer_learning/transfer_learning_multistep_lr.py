@@ -15,8 +15,8 @@ from PIL import ImageFile
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateLogger
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from src.transfer_learning.transfer_learning_module import TransferLearningModule
-from src.utils import print_system_info
+from coral_classifier.transfer_learning.transfer_learning_module import TransferLearningModule
+from coral_classifier.utils import print_system_info
 
 BN_TYPES = (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)
 ImageFile.LOAD_TRUNCATED_IMAGES = True

@@ -84,12 +84,12 @@ def move_data(train_df: pd.DataFrame, test_df):
         # nothing to do, if dirs already exist
         return
 
-    for i, row in tqdm(train_df.iterrows()):
+    for i, row in tqdm(train_df.iterrows(), total=len(train_df)):
         image_name = row.image.split("/")[-1]
         dest_location = os.path.join(train_dir, image_name)
         shutil.copyfile(row.image, dest_location)
 
-    for i, row in tqdm(test_df.iterrows()):
+    for i, row in tqdm(test_df.iterrows(), total=(len(test_df))):
         image_name = row.image.split("/")[-1]
         dest_location = os.path.join(test_dir, image_name)
         shutil.copyfile(row.image, dest_location)

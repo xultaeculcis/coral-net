@@ -11,12 +11,13 @@ import torch
 import torch.nn.functional as F
 import torchvision.models as models
 from torch import nn
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 
-from src.dataset import CoralFragDataset
-from src.imbalanced_dataset_sampler import ImbalancedDatasetSampler
-from src.utils import _plot_confusion_matrix, k_fold
+from coral_classifier.dataset import CoralFragDataset
+from coral_classifier.imbalanced_dataset_sampler import ImbalancedDatasetSampler
+from coral_classifier.utils import _plot_confusion_matrix, k_fold
 
 # imagenet normalization
 mean = (0.485, 0.456, 0.406)
@@ -96,12 +97,13 @@ class ParametersSplitsModule(pl.LightningModule, ABC):
         if isinstance(lr, numbers.Number):
             return [lr] * n_splits
         if isinstance(lr, (tuple, list)):
+            print(f"LRs: {len(lr)}, ParamSplits: {len(list(self.params_splits()))}")
             assert len(lr) == len(list(self.params_splits()))
             return lr
 
 
 #  --- Pytorch-lightning module ---
-class DifferentialLearningRatesModule(ParametersSplitsModule):
+class OneCycleWithFreezeModule(ParametersSplitsModule):
     """Transfer Learning with pre-trained Model.
     Args:
         hparams: Model hyperparameters
@@ -167,13 +169,22 @@ class DifferentialLearningRatesModule(ParametersSplitsModule):
     def __build_model(self):
         """Define model layers & loss."""
 
+        # 1. Load pre-trained network:
         model_func = getattr(models, self.backbone)
-        self.model = model_func(pretrained=True)
-        _n_inputs = self.model.fc.in_features
-        # 2. Classifier:
+        backbone = model_func(pretrained=True)
+        _layers = list(backbone.children())[:-1]
+        self.feature_extractor = torch.nn.Sequential(*_layers)
+
+        # 2. Classifier
+        _n_inputs = backbone.fc.in_features
         _fc_layers = [torch.nn.Linear(_n_inputs, 256),
-                      torch.nn.Linear(256, self.n_outputs)]
-        self.model.fc = torch.nn.Sequential(*_fc_layers)
+                      torch.nn.ReLU(),
+                      torch.nn.Dropout(),
+                      torch.nn.Linear(256, 32),
+                      torch.nn.ReLU(),
+                      torch.nn.Dropout(),
+                      torch.nn.Linear(32, self.n_classes)]
+        self.fc = torch.nn.Sequential(*_fc_layers)
 
         # 3. Loss:
         self.loss_func = F.binary_cross_entropy_with_logits if self.n_outputs == 1 else F.cross_entropy
@@ -317,24 +328,25 @@ class DifferentialLearningRatesModule(ParametersSplitsModule):
     def forward(self, x):
         """Forward pass. Returns logits."""
         # 1. Feature extraction:
-        x = self.model.forward(x)
+        x = self.feature_extractor(x)
+        x = x.squeeze(-1).squeeze(-1)
+
+        # 2. Classifier (returns logits):
+        x = self.fc(x)
 
         return x
+
 
     def loss(self, logits, labels):
         return self.loss_func(input=logits, target=labels)
 
     def model_splits(self):
-        groups = [torch.nn.Sequential(self.model.conv1, self.model.bn1)]
-        groups += [layer for name, layer in self.model.named_children() if name.startswith("layer")]
-        groups += [self.model.fc]  # Considering we already switched the head
-
-        return groups
+        return [self.feature_extractor, self.fc]
 
     def configure_optimizers(self):
         # passed lr does not matter, because scheduler will overtake
         param_groups = self.get_optimizer_param_groups(0)
-        opt = torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
+        opt = AdamW(param_groups, weight_decay=self.weight_decay)
         # return a dummy lr_scheduler, so LearningRateLogger doesn't complain
         sched = OneCycleLR(opt, 0, 9)
         return [opt], [sched]

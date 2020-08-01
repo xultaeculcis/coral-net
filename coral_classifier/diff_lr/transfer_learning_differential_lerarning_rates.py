@@ -15,8 +15,8 @@ from PIL import ImageFile
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateLogger
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from src.one_cycle.one_cycle_module import OneCycleModule
-from src.utils import print_system_info
+from coral_classifier.diff_lr.diff_lr_module import DifferentialLearningRatesModule
+from coral_classifier.utils import print_system_info
 
 BN_TYPES = (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -76,36 +76,16 @@ def add_model_specific_args(parent_parser):
                         metavar='TB',
                         help='Whether the BatchNorm layers should be trainable',
                         dest='train_bn')
-    parser.add_argument('--freeze-epochs',
-                        default=1,
-                        type=int,
-                        dest='freeze_epochs',
-                        help='For how many epochs the feature extractor should be frozen')
-    parser.add_argument('--epochs',
-                        default=6,
-                        type=int,
-                        dest='epochs',
-                        help='For how many epochs the model should be trained')
     parser.add_argument('--seed',
                         default=42,
                         type=int,
                         dest='seed',
                         help='The random seed for the reproducibility purposes')
-    parser.add_argument('--max-lr',
-                        default=1e-4,
-                        type=float,
-                        dest='max_lr',
-                        help='The max learning rate for the 1Cycle LR Scheduler')
     parser.add_argument('--div-factor',
                         default=5,
                         type=float,
                         dest='div_factor',
                         help='Determines the initial learning rate via initial_lr = max_lr/div_factor')
-    parser.add_argument('--pct-start',
-                        default=.3,
-                        type=float,
-                        dest='pct_start',
-                        help='The percentage of the cycle (in number of steps) spent increasing the learning rate')
     parser.add_argument('--final-div-factor',
                         default=1e2,
                         type=float,
@@ -167,10 +147,53 @@ def main(arguments: argparse.Namespace) -> None:
     print("Using following configuration: ")
     pprint(vars(arguments))
 
+    milestones = {
+        1: {
+
+            'freeze_to': -1,
+            'duration': 1,
+            'pct_start': .3,
+            'lrs': [.0, .0, .0, .0, .0, 1e-3]
+        },
+        2: {
+            'freeze_to': -2,
+            'duration': 1,
+            'pct_start': .3,
+            'lrs': [.0, .0, .0, .0, 5e-4, 5e-4]
+        },
+        3: {
+            'freeze_to': -3,
+            'duration': 1,
+            'pct_start': .3,
+            'lrs': [.0, .0, .0, 5e-5, 1e-4, 5e-4]
+        },
+        4: {
+            'freeze_to': -4,
+            'duration': 1,
+            'pct_start': .3,
+            'lrs': [.0, .0, 1e-5, 1e-5, 5e-5, 5e-4]
+        },
+        5: {
+            'freeze_to': -5,
+            'duration': 1,
+            'pct_start': .3,
+            'lrs': [.0, 1e-5, 1e-5, 1e-5, 1e-5, 1e-4]
+        },
+        6: {
+            'freeze_to': 0,
+            'duration': 1,
+            'pct_start': .3,
+            'lrs': [1e-5, 1e-5, 1e-5, 1e-5, 1e-5, 5e-5]
+        },
+    }
+
+    epochs = sum([milestone_config['duration'] for milestone_config in milestones.values()])
+    arguments.epochs = epochs
+
     for fold in range(1):
         print(f"Fold {fold}: Training is starting...")
         arguments.fold = fold
-        model = OneCycleModule(arguments)
+        model = DifferentialLearningRatesModule(arguments, milestones)
         logger = TensorBoardLogger("../logs", name=f"{arguments.backbone}-fold-{fold}")
 
         early_stop_callback = EarlyStopping(

@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 
 #  --- Utility functions ---
-from src.dataset import CoralFragDataset
+from coral_classifier.dataset import CoralFragDataset
 
 
 def print_system_info() -> None:

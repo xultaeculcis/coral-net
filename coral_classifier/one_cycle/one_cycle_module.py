@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Dict, Optional, Generator
+from typing import Dict
 
 import albumentations
 import pandas as pd
@@ -7,110 +7,22 @@ import pytorch_lightning as pl
 import pytorch_lightning.metrics.functional as plm
 import torch
 import torch.nn.functional as F
-from torch import optim
-from torch.nn import Module
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import MultiStepLR
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from torchvision import models
 
-from src.dataset import CoralFragDataset
-from src.imbalanced_dataset_sampler import ImbalancedDatasetSampler
-from src.utils import _plot_confusion_matrix, k_fold
+from coral_classifier.dataset import CoralFragDataset
+from coral_classifier.imbalanced_dataset_sampler import ImbalancedDatasetSampler
+from coral_classifier.utils import _plot_confusion_matrix, k_fold
 
 # imagenet normalization
 mean = (0.485, 0.456, 0.406)
 std = (0.229, 0.224, 0.225)
-BN_TYPES = (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)
-
-
-def _make_trainable(module: Module) -> None:
-    """Unfreezes a given module.
-    Args:
-        module: The module to unfreeze
-    """
-    for param in module.parameters():
-        param.requires_grad = True
-    module.train()
-
-
-def _recursive_freeze(module: Module,
-                      train_bn: bool = True) -> None:
-    """Freezes the layers of a given module.
-    Args:
-        module: The module to freeze
-        train_bn: If True, leave the BatchNorm layers in training mode
-    """
-    children = list(module.children())
-    if not children:
-        if not (isinstance(module, BN_TYPES) and train_bn):
-            for param in module.parameters():
-                param.requires_grad = False
-            module.eval()
-        else:
-            # Make the BN layers trainable
-            _make_trainable(module)
-    else:
-        for child in children:
-            _recursive_freeze(module=child, train_bn=train_bn)
-
-
-def freeze(module: Module,
-           n: Optional[int] = None,
-           train_bn: bool = True) -> None:
-    """Freezes the layers up to index n (if n is not None).
-    Args:
-        module: The module to freeze (at least partially)
-        n: Max depth at which we stop freezing the layers. If None, all
-            the layers of the given module will be frozen.
-        train_bn: If True, leave the BatchNorm layers in training mode
-    """
-    children = list(module.children())
-    n_max = len(children) if n is None else int(n)
-
-    for child in children[:n_max]:
-        _recursive_freeze(module=child, train_bn=train_bn)
-
-    for child in children[n_max:]:
-        _make_trainable(module=child)
-
-
-def filter_params(module: Module,
-                  train_bn: bool = True) -> Generator:
-    """Yields the trainable parameters of a given module.
-    Args:
-        module: A given module
-        train_bn: If True, leave the BatchNorm layers in training mode
-    Returns:
-        Generator
-    """
-    children = list(module.children())
-    if not children:
-        if not (isinstance(module, BN_TYPES) and train_bn):
-            for param in module.parameters():
-                if param.requires_grad:
-                    yield param
-    else:
-        for child in children:
-            for param in filter_params(module=child, train_bn=train_bn):
-                yield param
-
-
-def _unfreeze_and_add_param_group(module: Module,
-                                  optimizer: Optimizer,
-                                  lr: Optional[float] = None,
-                                  train_bn: bool = True):
-    """Unfreezes a module and adds its parameters to an optimizer."""
-    _make_trainable(module)
-    params_lr = optimizer.param_groups[0]['lr'] if lr is None else float(lr)
-    optimizer.add_param_group({
-        'params': filter_params(module=module, train_bn=train_bn),
-        'lr': params_lr / 10.
-    })
 
 
 #  --- Pytorch-lightning module ---
-class TransferLearningModule(pl.LightningModule):
+class OneCycleModule(pl.LightningModule):
     """Transfer Learning with pre-trained Model.
     Args:
         hparams: Model hyperparameters
@@ -138,11 +50,15 @@ class TransferLearningModule(pl.LightningModule):
         self.fold_number = hparams.fold
         self.seed = hparams.seed
         self.epochs = hparams.epochs
+        self.weight_decay = hparams.weight_decay
         self.train_csv = hparams.train_csv
         self.test_csv = hparams.test_csv
-        self.lr = hparams.lr
-        self.lr_scheduler_gamma = hparams.lr_scheduler_gamma
-        self.milestones = hparams.milestones
+        self.max_lr = hparams.max_lr
+        self.pct_start = hparams.pct_start
+        self.div_factor = hparams.div_factor
+        self.final_div_factor = hparams.final_div_factor
+        self.base_momentum = hparams.base_momentum
+        self.max_momentum = hparams.max_momentum
         self.input_size = (224, 224)
 
         self.__build_model()
@@ -152,6 +68,7 @@ class TransferLearningModule(pl.LightningModule):
         self.train_loader = self.__dataloader(stage='train')
         self.val_loader = self.__dataloader(stage='validation')
         self.test_loader = self.__dataloader(stage='test')
+        self.total_steps = len(self.train_dataloader()) * self.epochs
 
     def __validate_args(self, backbone, n_classes, n_outputs):
         if n_classes == 7 and n_outputs != 7:
@@ -177,17 +94,10 @@ class TransferLearningModule(pl.LightningModule):
         backbone = model_func(pretrained=True)
         _layers = list(backbone.children())[:-1]
         self.feature_extractor = torch.nn.Sequential(*_layers)
-        freeze(module=self.feature_extractor, train_bn=self.train_bn)
 
         # 2. Classifier
         _n_inputs = backbone.fc.in_features
-        _fc_layers = [torch.nn.Linear(_n_inputs, 256),
-                      torch.nn.ReLU(),
-                      torch.nn.Dropout(),
-                      torch.nn.Linear(256, 32),
-                      torch.nn.ReLU(),
-                      torch.nn.Dropout(),
-                      torch.nn.Linear(32, self.n_classes)]
+        _fc_layers = [torch.nn.Linear(_n_inputs, self.n_outputs)]
         self.fc = torch.nn.Sequential(*_fc_layers)
 
         # 3. Loss:
@@ -343,44 +253,23 @@ class TransferLearningModule(pl.LightningModule):
     def loss(self, logits, labels):
         return self.loss_func(input=logits, target=labels)
 
-    def train(self, mode=True):
-        super().train(mode=mode)
-
-        epoch = self.current_epoch
-        if epoch < self.milestones[0] and mode:
-            # feature extractor is frozen (except for BatchNorm layers)
-            freeze(module=self.feature_extractor,
-                   train_bn=self.train_bn)
-
-        elif self.milestones[0] <= epoch < self.milestones[1] and mode:
-            # Unfreeze last two layers of the feature extractor
-            freeze(module=self.feature_extractor,
-                   n=-2,
-                   train_bn=self.train_bn)
-
-    def on_epoch_start(self):
-        """Use `on_epoch_start` to unfreeze layers progressively."""
-        optimizer = self.trainer.optimizers[0]
-        if self.current_epoch == self.milestones[0]:
-            _unfreeze_and_add_param_group(module=self.feature_extractor[-2:],
-                                          optimizer=optimizer,
-                                          train_bn=self.train_bn)
-
-        elif self.current_epoch == self.milestones[1]:
-            _unfreeze_and_add_param_group(module=self.feature_extractor[:-2],
-                                          optimizer=optimizer,
-                                          train_bn=self.train_bn)
+    def model_splits(self):
+        return [self.feature_extractor, self.fc]
 
     def configure_optimizers(self):
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                      self.parameters()),
-                               lr=self.lr)
-
-        scheduler = MultiStepLR(optimizer,
-                                milestones=self.milestones,
-                                gamma=self.lr_scheduler_gamma)
-
-        return [optimizer], [scheduler]
+        # passed lr does not matter, because scheduler will overtake
+        opt = AdamW(self.parameters(), weight_decay=self.weight_decay)
+        # return a dummy lr_scheduler, so LearningRateLogger doesn't complain
+        scheduler = OneCycleLR(opt,
+                               max_lr=self.max_lr,
+                               total_steps=self.total_steps,
+                               pct_start=self.pct_start,
+                               div_factor=self.div_factor,
+                               final_div_factor=self.final_div_factor,
+                               base_momentum=self.base_momentum,
+                               max_momentum=self.max_momentum)
+        scheduler = {'scheduler': scheduler, 'interval': 'step'}
+        return [opt], [scheduler]
 
     def training_step(self, batch, batch_idx):
         train_loss, num_correct = self.__step(batch)
@@ -388,8 +277,7 @@ class TransferLearningModule(pl.LightningModule):
         log = {
             'Train/loss': train_loss,
             'Train/acc': train_acc,
-            'Train/num_correct': num_correct,
-            'Train/lr': self.trainer.optimizers[0].param_groups[0]['lr']
+            'Train/num_correct': num_correct
         }
 
         output = OrderedDict(

@@ -1,4 +1,4 @@
-"""Computer vision example on Transfer Learning.
+"""Computer vitest_loggertest_loggersion example on Transfer Learning.
 This computer vision example illustrates how one could fine-tune a pre-trained
 network using pytorch-lightning.
 Note:
@@ -15,9 +15,10 @@ from PIL import ImageFile
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateLogger
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from src.one_cycle.one_cycle_freeze_module import OneCycleWithFreezeModule
-from src.utils import print_system_info
+from coral_classifier.one_cycle.one_cycle_module import OneCycleModule
+from coral_classifier.utils import print_system_info
 
+BN_TYPES = (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
@@ -75,13 +76,28 @@ def add_model_specific_args(parent_parser):
                         metavar='TB',
                         help='Whether the BatchNorm layers should be trainable',
                         dest='train_bn')
+    parser.add_argument('--freeze-epochs',
+                        default=1,
+                        type=int,
+                        dest='freeze_epochs',
+                        help='For how many epochs the feature extractor should be frozen')
+    parser.add_argument('--epochs',
+                        default=6,
+                        type=int,
+                        dest='epochs',
+                        help='For how many epochs the model should be trained')
     parser.add_argument('--seed',
                         default=42,
                         type=int,
                         dest='seed',
                         help='The random seed for the reproducibility purposes')
+    parser.add_argument('--max-lr',
+                        default=1e-4,
+                        type=float,
+                        dest='max_lr',
+                        help='The max learning rate for the 1Cycle LR Scheduler')
     parser.add_argument('--div-factor',
-                        default=10,
+                        default=5,
                         type=float,
                         dest='div_factor',
                         help='Determines the initial learning rate via initial_lr = max_lr/div_factor')
@@ -151,29 +167,10 @@ def main(arguments: argparse.Namespace) -> None:
     print("Using following configuration: ")
     pprint(vars(arguments))
 
-    milestones = {
-        1: {
-
-            'freeze_to': -1,
-            'duration': 2,
-            'pct_start': .7,
-            'lrs': [.0, 1e-4]
-        },
-        3: {
-            'freeze_to': 0,
-            'duration': 4,
-            'pct_start': .6,
-            'lrs': [1e-4, 1e-4]
-        }
-    }
-
-    epochs = sum([milestone_config['duration'] for milestone_config in milestones.values()])
-    arguments.epochs = epochs
-
     for fold in range(1):
         print(f"Fold {fold}: Training is starting...")
         arguments.fold = fold
-        model = OneCycleWithFreezeModule(arguments, milestones)
+        model = OneCycleModule(arguments)
         logger = TensorBoardLogger("../logs", name=f"{arguments.backbone}-fold-{fold}")
 
         early_stop_callback = EarlyStopping(
