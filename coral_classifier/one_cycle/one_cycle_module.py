@@ -1,5 +1,5 @@
+import argparse
 from collections import OrderedDict
-from typing import Dict
 
 import albumentations
 import pandas as pd
@@ -34,6 +34,16 @@ class OneCycleModule(pl.LightningModule):
         self.supported_architectures = ['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152',
                                         'resnext50_32x4d', 'resnext101_32x8d',
                                         'wide_resnet50_2', 'wide_resnet101_2']
+
+        if type(hparams) is dict:
+            a = argparse.ArgumentParser()
+            for key in hparams.keys():
+                a.add_argument(
+                    f'--{key}',
+                    default=hparams[key]
+                )
+            args = a.parse_args()
+            hparams = args
 
         self.__validate_args(hparams.backbone, hparams.n_classes, hparams.n_outputs)
         self.hparams = hparams

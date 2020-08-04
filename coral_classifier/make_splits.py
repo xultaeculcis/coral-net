@@ -12,7 +12,7 @@ output_data_dir = "../datasets"
 CLASS_NAMES = os.listdir(data_dir)
 RANDOM_SEED = 42
 dirs = [os.path.join(data_dir, c) for c in CLASS_NAMES]
-n_splits = 5
+n_splits = 10
 positive_class = "sps acropora"
 
 
@@ -71,11 +71,12 @@ def create_folds(frame_path):
     return new_frame
 
 
-def move_data(train_df: pd.DataFrame, test_df):
+def move_data(train_df: pd.DataFrame, test_df: pd.DataFrame):
     print("Moving data to train and test folders")
     # make sure the dirs exist
     train_dir = os.path.join(output_data_dir, "train")
     test_dir = os.path.join(output_data_dir, "test")
+
     try:
         os.mkdir(train_dir)
         os.mkdir(test_dir)
@@ -111,7 +112,7 @@ def main(binary=False):
     X_train, X_test, y_train, y_test = model_selection.train_test_split(
         df,
         df.label.values,
-        test_size=0.2,
+        test_size=0.1,
         random_state=RANDOM_SEED
     )
 

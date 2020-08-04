@@ -25,13 +25,13 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 def add_model_specific_args(parent_parser):
     parser = argparse.ArgumentParser(parents=[parent_parser])
     parser.add_argument('--backbone',
-                        # default='resnext50_32x4d',
-                        default='resnet18',
+                        default='resnext50_32x4d',
+                        # default='resnet18',
                         type=str,
                         metavar='BK',
                         help='Name (as in ``torchvision.models``) of the feature extractor')
     parser.add_argument('--batch-size',
-                        default=64,
+                        default=48,
                         type=int,
                         metavar='B',
                         help='Batch size',
@@ -65,7 +65,7 @@ def add_model_specific_args(parent_parser):
                              'will determine if binary cross-entropy with logits or cross-entropy loss is used',
                         dest='n_outputs')
     parser.add_argument('--folds',
-                        default=5,
+                        default=10,
                         type=int,
                         metavar='F',
                         help='Number of folds in k-Fold Cross Validation',
@@ -76,13 +76,8 @@ def add_model_specific_args(parent_parser):
                         metavar='TB',
                         help='Whether the BatchNorm layers should be trainable',
                         dest='train_bn')
-    parser.add_argument('--freeze-epochs',
-                        default=1,
-                        type=int,
-                        dest='freeze_epochs',
-                        help='For how many epochs the feature extractor should be frozen')
     parser.add_argument('--epochs',
-                        default=6,
+                        default=3,
                         type=int,
                         dest='epochs',
                         help='For how many epochs the model should be trained')
@@ -147,7 +142,7 @@ def add_model_specific_args(parent_parser):
                         help='How many best k models to save',
                         dest='save_top_k')
     parser.add_argument('--precision',
-                        default=16,
+                        default=32,
                         type=int,
                         help='Training precision - 16 bit by default',
                         dest='precision')
@@ -167,7 +162,7 @@ def main(arguments: argparse.Namespace) -> None:
     print("Using following configuration: ")
     pprint(vars(arguments))
 
-    for fold in range(1):
+    for fold in range(10):
         print(f"Fold {fold}: Training is starting...")
         arguments.fold = fold
         model = OneCycleModule(arguments)
@@ -196,11 +191,12 @@ def main(arguments: argparse.Namespace) -> None:
             max_epochs=arguments.epochs,
             logger=logger,
             deterministic=True,
-            benchmark=False,
+            benchmark=True,
             early_stop_callback=early_stop_callback,
             checkpoint_callback=checkpoint_callback,
             callbacks=[lr_logger],
             precision=arguments.precision,
+            row_log_interval=10,
             # fast_dev_run=True
         )
 
@@ -212,6 +208,13 @@ def main(arguments: argparse.Namespace) -> None:
         print("-" * 80)
         print(f"Testing the model on fold: {fold}")
         trainer.test(model)
+
+        model.cpu()
+        del model
+        del trainer
+        del logger
+        del early_stop_callback
+        del checkpoint_callback
 
 
 def get_args() -> argparse.Namespace:

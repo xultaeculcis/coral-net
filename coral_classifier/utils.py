@@ -84,7 +84,6 @@ def _plot_confusion_matrix(cm,
 
 
 def k_fold(df: DataFrame, k: int = 5, seed: int = 42):
-    print(f"Creating folds. k = {k}")
     df["kfold"] = -1
     new_frame = df.sample(frac=1, random_state=seed).reset_index(drop=True)
     y = new_frame.label.values
@@ -92,8 +91,6 @@ def k_fold(df: DataFrame, k: int = 5, seed: int = 42):
 
     for f, (t_, v_) in enumerate(kf.split(X=new_frame, y=y)):
         new_frame.loc[v_, 'kfold'] = f
-
-    print(f"Created {k} folds for the cross validation")
 
     return new_frame
 
