@@ -246,3 +246,4 @@ model-weights/
 lightning_logs/
 cifar10/
 mnist/
+/coral_classifier/predictions/
