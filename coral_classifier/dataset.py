@@ -24,7 +24,7 @@ class CoralFragDataset(Dataset):
         self.resize = resize
         self.augmentations = augmentations
         self.binary = binary
-        self.classes = [
+        self.classes = sorted([
             "Montipora",
             "Other",
             "Acropora",
@@ -35,7 +35,7 @@ class CoralFragDataset(Dataset):
         ] if not binary else [
             "Other",
             "Acropora"
-        ]
+        ])
         self.class_lookup_by_name = dict([(c, i) for i, c in enumerate(self.classes)])
         self.class_lookup_by_index = dict([(i, c) for i, c in enumerate(self.classes)])
 

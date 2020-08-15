@@ -14,7 +14,8 @@ from torchvision import models
 
 from coral_classifier.dataset import CoralFragDataset
 from coral_classifier.imbalanced_dataset_sampler import ImbalancedDatasetSampler
-from coral_classifier.utils import _plot_confusion_matrix, k_fold
+from coral_classifier.make_splits import k_fold
+from coral_classifier.utils import _plot_confusion_matrix
 
 # imagenet normalization
 mean = (0.485, 0.456, 0.406)

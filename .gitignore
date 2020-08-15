@@ -243,6 +243,7 @@ datasets/
 *.bin
 *.pth
 model-weights/
+model-weights-backup/
 lightning_logs/
 cifar10/
 mnist/

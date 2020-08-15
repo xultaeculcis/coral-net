@@ -1,15 +1,14 @@
 import itertools
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from pandas import DataFrame
-from sklearn import model_selection
 from torch.utils.data import DataLoader
+
+from coral_classifier.dataset import CoralFragDataset
 
 
 #  --- Utility functions ---
-from coral_classifier.dataset import CoralFragDataset
-
 
 def print_system_info() -> None:
     # If there's a GPU available...
@@ -81,18 +80,6 @@ def _plot_confusion_matrix(cm,
     plt.xlabel('Predicted label')
 
     return figure
-
-
-def k_fold(df: DataFrame, k: int = 5, seed: int = 42):
-    df["kfold"] = -1
-    new_frame = df.sample(frac=1, random_state=seed).reset_index(drop=True)
-    y = new_frame.label.values
-    kf = model_selection.StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
-
-    for f, (t_, v_) in enumerate(kf.split(X=new_frame, y=y)):
-        new_frame.loc[v_, 'kfold'] = f
-
-    return new_frame
 
 
 def plot_single_batch(loader: DataLoader, dataset: CoralFragDataset) -> None:

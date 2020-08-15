@@ -146,6 +146,11 @@ def add_model_specific_args(parent_parser):
                         type=int,
                         help='Training precision - 16 bit by default',
                         dest='precision')
+    parser.add_argument('--only-fold',
+                        default=-1,
+                        type=int,
+                        help='Train only on one specified fold',
+                        dest='only_fold')
     return parser
 
 
@@ -162,7 +167,11 @@ def main(arguments: argparse.Namespace) -> None:
     print("Using following configuration: ")
     pprint(vars(arguments))
 
-    for fold in range(10):
+    for fold in range(arguments.folds):
+
+        if arguments.only_fold != -1:
+            fold = arguments.only_fold
+
         print(f"Fold {fold}: Training is starting...")
         arguments.fold = fold
         model = OneCycleModule(arguments)
@@ -215,6 +224,10 @@ def main(arguments: argparse.Namespace) -> None:
         del logger
         del early_stop_callback
         del checkpoint_callback
+
+        # end CV loop if we only train on one fold
+        if arguments.only_fold != -1:
+            break
 
 
 def get_args() -> argparse.Namespace:
