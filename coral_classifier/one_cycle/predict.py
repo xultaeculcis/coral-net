@@ -23,7 +23,8 @@ CONFIG = {
     'folds': 10,
     'checkpoint_store_path': '../../model-weights',
     'batch_size': 48,
-    'prediction_summary_files_path': '../predictions'
+    'prediction_summary_files_path': '../predictions',
+    'unlabeled_data_dir': '../datasets/labeled'
 }
 device = 'cuda'
 
@@ -37,7 +38,7 @@ class UnlabeledDataset(Dataset):
         self.image_names = image_names
         self.resize = resize
         self.augmentations = augmentations
-        self.classes = [
+        self.classes = sorted([
             "Montipora",
             "Other",
             "Acropora",
@@ -45,7 +46,7 @@ class UnlabeledDataset(Dataset):
             "Euphyllia",
             "Chalice",
             "Acanthastrea"
-        ]
+        ])
 
         self.class_lookup_by_name = dict([(c, i) for i, c in enumerate(self.classes)])
         self.class_lookup_by_index = dict([(i, c) for i, c in enumerate(self.classes)])
@@ -83,17 +84,23 @@ class UnlabeledDataset(Dataset):
 
 
 def main() -> None:
-    data_dir = '../../datasets/unlabeled'
-    folders = os.listdir(data_dir)
+    folders = os.listdir(CONFIG['unlabeled_data_dir'])
     folders.sort()
     already_processed = glob.glob(os.path.join(CONFIG["prediction_summary_files_path"], '*.json'))
     already_processed = [folder.split('/')[-1].replace('.json', '') for folder in already_processed]
 
-    for folder in folders:
+    for i, folder in enumerate(folders):
         print("="*80)
+        print(f"Progress {i + 1}/{len(folders)}")
         if folder in already_processed:
             continue
-        _process_folder(data_dir, folder)
+        _process_folder(CONFIG['unlabeled_data_dir'], folder)
+
+    for csv in glob.glob(os.path.join(CONFIG['prediction_summary_files_path'], '*.csv')):
+        _move_files(csv)
+
+    print("="*80)
+    print("DONE")
 
 
 def _process_folder(data_dir: Union[Path, str], folder: str):
@@ -214,45 +221,37 @@ def _process_json(json_file_name: Union[Path, str], index_to_class_label_lookup:
             header=True)
 
 
-def _copy_files(csv_file_path: Union[Path, str]):
+def _move_files(csv_file_path: Union[Path, str]):
     df = pd.read_csv(csv_file_path)
     pretty_sure = df[df.avg_confidence > 0.95]
     unsure = df[df.avg_confidence <= 0.95]
 
-    data_dir = '../../datasets/labeled/'
     folder = csv_file_path.split('/')[-1].replace('.csv', '')
     low_confidence = 'low_confidence'
 
     for c in pretty_sure.predicted_class_label.unique():
-        os.makedirs(os.path.join(data_dir, folder, c), exist_ok=True)
+        os.makedirs(os.path.join(CONFIG['unlabeled_data_dir'], folder, c), exist_ok=True)
 
-    os.makedirs(os.path.join(data_dir, folder, low_confidence), exist_ok=True)
+    os.makedirs(os.path.join(CONFIG['unlabeled_data_dir'], folder, low_confidence), exist_ok=True)
 
-    def __copy_images(frame, class_name=None):
+    def __move_images(frame, class_name=None):
         for i, row in tqdm(frame.iterrows(), total=len(frame)):
             img_name = row.img_path.split('/')[-1]
-            shutil.copy(
+            shutil.move(
                 row.img_path,
-                os.path.join(data_dir,
+                os.path.join(CONFIG['unlabeled_data_dir'],
                              folder,
                              class_name if class_name is not None else row.predicted_class_label,
                              img_name)
             )
     # save high confidence images
-    print(f'Copying high confidence images to new location for folder: {folder}')
-    __copy_images(pretty_sure)
+    print(f'Moving high confidence images to new location for folder: {folder}')
+    __move_images(pretty_sure)
     # save low confidence images
-    print(f'Copying low confidence images to new location for folder: {folder}')
-    __copy_images(unsure, low_confidence)
+    print(f'Moving low confidence images to new location for folder: {folder}')
+    __move_images(unsure, low_confidence)
 
 
 if __name__ == '__main__':
     pl.seed_everything(42)
-
-    # main()
-
-    for csv in glob.glob(os.path.join(CONFIG['prediction_summary_files_path'], '*.csv')):
-        _copy_files(csv)
-
-    print("="*80)
-    print("DONE")
+    main()
