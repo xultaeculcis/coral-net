@@ -25,13 +25,13 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 def add_model_specific_args(parent_parser):
     parser = argparse.ArgumentParser(parents=[parent_parser])
     parser.add_argument('--backbone',
-                        default='resnext50_32x4d',
-                        # default='resnet18',
+                        # default='resnext50_32x4d',
+                        default='resnet34',
                         type=str,
                         metavar='BK',
                         help='Name (as in ``torchvision.models``) of the feature extractor')
     parser.add_argument('--batch-size',
-                        default=48,
+                        default=128,
                         type=int,
                         metavar='B',
                         help='Batch size',
@@ -54,12 +54,12 @@ def add_model_specific_args(parent_parser):
                         help='Number of CPU workers',
                         dest='num_workers')
     parser.add_argument('--num-classes',
-                        default=7,
+                        default=37,
                         type=int,
                         help='Number of classes to classify',
                         dest='n_classes')
     parser.add_argument('--num-outputs',
-                        default=7,
+                        default=37,
                         type=int,
                         help='Number of outputs from the final classification layer - '
                              'will determine if binary cross-entropy with logits or cross-entropy loss is used',
@@ -77,7 +77,7 @@ def add_model_specific_args(parent_parser):
                         help='Whether the BatchNorm layers should be trainable',
                         dest='train_bn')
     parser.add_argument('--epochs',
-                        default=3,
+                        default=10,
                         type=int,
                         dest='epochs',
                         help='For how many epochs the model should be trained')
@@ -87,7 +87,7 @@ def add_model_specific_args(parent_parser):
                         dest='seed',
                         help='The random seed for the reproducibility purposes')
     parser.add_argument('--max-lr',
-                        default=1e-4,
+                        default=1e-3,
                         type=float,
                         dest='max_lr',
                         help='The max learning rate for the 1Cycle LR Scheduler')
@@ -142,7 +142,7 @@ def add_model_specific_args(parent_parser):
                         help='How many best k models to save',
                         dest='save_top_k')
     parser.add_argument('--precision',
-                        default=32,
+                        default=16,
                         type=int,
                         help='Training precision - 16 bit by default',
                         dest='precision')

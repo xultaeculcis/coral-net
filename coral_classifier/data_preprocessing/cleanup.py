@@ -26,21 +26,6 @@ def get_args() -> argparse.Namespace:
                         default="../../datasets/data-lake",
                         help='Root directory where the raw data resides',
                         dest='root_data_path')
-    parser.add_argument('--class-folders',
-                        default=['b1', 'b2', 'b3', 'b4'],
-                        type=list,
-                        metavar='cf',
-                        help='Which folders from the data-root-dir contain the same class '
-                             'and should be processed together',
-                        dest='class_folders')
-    parser.add_argument('--class-name',
-                        default='bubble_tip_anemone',
-                        type=str,
-                        metavar='class',
-                        help="String label of the class that's being processed in current script execution. "
-                             "Will be used to create the image folder for that class. "
-                             "Only used if renaming is not performed inplace. None by default.",
-                        dest='class_name')
     parser.add_argument('--rename-output-folder',
                         default="../../datasets/intermediate-stage",
                         type=str,
@@ -140,27 +125,25 @@ def remove_duplicates(paths: Union[List[str], List[Path]]):
 
 
 def main(args):
-    file_paths = rename_files_in_folders(args.class_folders,
-                                         args.root_data_path,
-                                         args.rename_output_folder,
-                                         args.class_name)
-    convert_files(file_paths, args.convert_to)
+    classes = sorted(os.listdir(args.root_data_path))
+    for class_name, folder in zip(classes, [os.path.join(args.root_data_path, c) for c in classes]):
+        class_folders = os.listdir(folder)
+        file_paths = rename_files_in_folders(class_folders,
+                                             folder,
+                                             args.rename_output_folder,
+                                             class_name)
+        convert_files(file_paths, args.convert_to)
 
-    if args.rename_output_folder is None:
-        dirs_to_chek = [os.path.join(args.root_data_path, folder) for folder in args.class_folders]
-    else:
-        dirs_to_chek = [os.path.join(args.root_data_path, args.rename_output_folder)]
+        if args.rename_output_folder is None:
+            dirs_to_chek = [os.path.join(args.root_data_path, folder) for folder in args.class_folders]
+        else:
+            dirs_to_chek = [os.path.join(args.root_data_path, args.rename_output_folder)]
 
-    remove_duplicates(dirs_to_chek)
+        remove_duplicates(dirs_to_chek)
 
 
 if __name__ == "__main__":
     arguments = get_args()
-
-    if arguments.class_name and not arguments.rename_output_folder:
-        logging.warning("class-name argument has been provided, but the renaming was configured to run inplace. "
-                        "This will have no effect...")
-
     logging.info(f"Raw data processing has started with following arguments:\n {vars(arguments)}")
     main(arguments)
     logging.info("Done")

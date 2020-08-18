@@ -12,6 +12,7 @@ class CoralFragDataset(Dataset):
     def __init__(self,
                  image_names: list,
                  targets: list,
+                 classes: list,
                  binary=False,
                  root_dir: str = "./",
                  train: bool = True,
@@ -24,18 +25,7 @@ class CoralFragDataset(Dataset):
         self.resize = resize
         self.augmentations = augmentations
         self.binary = binary
-        self.classes = sorted([
-            "Montipora",
-            "Other",
-            "Acropora",
-            "Zoa",
-            "Euphyllia",
-            "Chalice",
-            "Acanthastrea"
-        ] if not binary else [
-            "Other",
-            "Acropora"
-        ])
+        self.classes = sorted(classes)
         self.class_lookup_by_name = dict([(c, i) for i, c in enumerate(self.classes)])
         self.class_lookup_by_index = dict([(i, c) for i, c in enumerate(self.classes)])
 
@@ -44,7 +34,7 @@ class CoralFragDataset(Dataset):
 
     def __getitem__(self, idx):
         image_name = self.image_names[idx]
-        image_path = os.path.join(self.root_dir, "train" if self.train else "test", image_name)
+        image_path = os.path.join(self.root_dir, "train", image_name)
         image = Image.open(image_path)
         targets = self.targets[idx]
 

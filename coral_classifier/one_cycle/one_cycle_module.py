@@ -181,7 +181,7 @@ class OneCycleModule(pl.LightningModule):
         df = pd.read_csv(self.train_csv)
         df = k_fold(df, self.folds, self.seed)
         df_test = pd.read_csv(self.test_csv)
-
+        classes = sorted(df['text_label'].unique().tolist())
         resize_to = [224, 224]
 
         train_aug = albumentations.Compose(
@@ -201,6 +201,7 @@ class OneCycleModule(pl.LightningModule):
         test_targets = df_test.label
         test_dataset = CoralFragDataset(image_names=test_image_names,
                                         targets=test_targets,
+                                        classes=classes,
                                         binary=self.is_binary,
                                         root_dir=self.root_data_path,
                                         train=False,
@@ -218,6 +219,7 @@ class OneCycleModule(pl.LightningModule):
 
         train_dataset = CoralFragDataset(image_names=train_image_names,
                                          targets=train_targets,
+                                         classes=classes,
                                          binary=self.is_binary,
                                          root_dir=self.root_data_path,
                                          train=True,
@@ -226,6 +228,7 @@ class OneCycleModule(pl.LightningModule):
 
         val_dataset = CoralFragDataset(image_names=val_image_names,
                                        targets=val_targets,
+                                       classes=classes,
                                        binary=self.is_binary,
                                        root_dir=self.root_data_path,
                                        train=True,

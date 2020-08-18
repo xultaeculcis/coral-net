@@ -105,7 +105,7 @@ def add_args(parent_parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                              'Only used if include-test flag is set tot True. 10% by default',
                         dest='test_size')
     parser.add_argument('--include-test',
-                        default=False,
+                        default=True,
                         type=bool,
                         help='Indicates if the test set should also be created. False by default.',
                         dest='include_test')
