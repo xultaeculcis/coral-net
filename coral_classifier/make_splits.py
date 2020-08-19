@@ -94,7 +94,7 @@ def add_args(parent_parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                         help='Random seed for reproducibility. 42 by default.',
                         dest='seed')
     parser.add_argument('--k',
-                        default=10,
+                        default=5,
                         type=int,
                         help='Number of splits for the k-fold cross validation',
                         dest='k')
@@ -125,7 +125,13 @@ def get_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     arguments = get_args()
-    arguments.classes = sorted(os.listdir(arguments.data_dir))
+    all_classes = sorted(os.listdir(arguments.data_dir))
+    classes = []
+    for c in all_classes:
+        if len(os.listdir(os.path.join(arguments.data_dir, c))) < 3000:
+            classes.append(c)
+
+    arguments.classes = classes
     arguments.dirs = sorted([os.path.join(arguments.data_dir, c) for c in arguments.classes])
     main(arguments)
     print("Done")

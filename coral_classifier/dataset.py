@@ -5,27 +5,24 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+import pandas as pd
 
 
 #  --- Dataset ----
 class CoralFragDataset(Dataset):
     def __init__(self,
-                 image_names: list,
-                 targets: list,
-                 classes: list,
-                 binary=False,
-                 root_dir: str = "./",
+                 df: pd.DataFrame,
+                 data_dir: str = "./",
                  train: bool = True,
                  resize=None,
                  augmentations=None):
-        self.image_names = image_names
-        self.targets = targets
-        self.root_dir = root_dir
+        self.image_names = df['image']
+        self.targets = df['label']
+        self.data_dir = data_dir
         self.train = train
         self.resize = resize
         self.augmentations = augmentations
-        self.binary = binary
-        self.classes = sorted(classes)
+        self.classes = sorted(df['text_label'].unique().tolist())
         self.class_lookup_by_name = dict([(c, i) for i, c in enumerate(self.classes)])
         self.class_lookup_by_index = dict([(i, c) for i, c in enumerate(self.classes)])
 
@@ -34,7 +31,7 @@ class CoralFragDataset(Dataset):
 
     def __getitem__(self, idx):
         image_name = self.image_names[idx]
-        image_path = os.path.join(self.root_dir, "train", image_name)
+        image_path = os.path.join(self.data_dir, image_name)
         image = Image.open(image_path)
         targets = self.targets[idx]
 
@@ -60,7 +57,7 @@ class CoralFragDataset(Dataset):
 
     def as_pillow(self, idx):
         image_name = self.image_names[idx]
-        image_path = os.path.join(self.root_dir, "train" if self.train else "test", image_name)
+        image_path = os.path.join(self.data_dir, image_name)
         image = Image.open(image_path)
         targets = self.targets[idx]
         return image, self.class_lookup_by_index[targets]

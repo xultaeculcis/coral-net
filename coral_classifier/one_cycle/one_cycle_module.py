@@ -1,4 +1,5 @@
 import argparse
+import os
 from collections import OrderedDict
 
 import albumentations
@@ -46,15 +47,12 @@ class OneCycleModule(pl.LightningModule):
             args = a.parse_args()
             hparams = args
 
-        self.__validate_args(hparams.backbone, hparams.n_classes, hparams.n_outputs)
+        self.__validate_args(hparams.backbone)
         self.hparams = hparams
 
         self.backbone = hparams.backbone
         self.train_bn = hparams.train_bn
         self.batch_size = hparams.batch_size
-        self.n_classes = hparams.n_classes
-        self.n_outputs = hparams.n_outputs
-        self.is_binary = hparams.n_outputs <= 2
         self.root_data_path = hparams.root_data_path
         self.num_workers = hparams.num_workers
         self.folds = hparams.folds
@@ -72,27 +70,15 @@ class OneCycleModule(pl.LightningModule):
         self.max_momentum = hparams.max_momentum
         self.input_size = (224, 224)
 
-        self.__build_model()
         self.__setup()
+        self.__build_model()
 
-        self.classes = self.train_dataset.classes
         self.train_loader = self.__dataloader(stage='train')
         self.val_loader = self.__dataloader(stage='validation')
         self.test_loader = self.__dataloader(stage='test')
         self.total_steps = len(self.train_dataloader()) * self.epochs
 
-    def __validate_args(self, backbone, n_classes, n_outputs):
-        if n_classes == 7 and n_outputs != 7:
-            raise ValueError(f"Invalid parameters passed to the module - for multiclass classification the number\n"
-                             f"of outputs must be the same as number of classes - you passed: "
-                             f"n_classes: {n_classes}, n_outputs {n_outputs}\n"
-                             f"This combination is invalid.")
-        if n_classes == 2 and n_outputs not in [1, 2]:
-            raise ValueError(f"Invalid parameters passed to the module - for binary classification the number\n"
-                             f"of outputs must be equal to either 2 (cross entropy loss is used)\n"
-                             f"or 1 (binary cross entropy with logits is used) - you passed: "
-                             f"n_classes: {n_classes}, n_outputs {n_outputs}\n"
-                             f"This combination is invalid.")
+    def __validate_args(self, backbone):
         if backbone not in self.supported_architectures:
             raise Exception(f"The '{backbone}' is currently not supported as a backbone. "
                             f"Supported architectures are: {', '.join(self.supported_architectures)}")
@@ -181,7 +167,6 @@ class OneCycleModule(pl.LightningModule):
         df = pd.read_csv(self.train_csv)
         df = k_fold(df, self.folds, self.seed)
         df_test = pd.read_csv(self.test_csv)
-        classes = sorted(df['text_label'].unique().tolist())
         resize_to = [224, 224]
 
         train_aug = albumentations.Compose(
@@ -197,13 +182,8 @@ class OneCycleModule(pl.LightningModule):
             ]
         )
 
-        test_image_names = df_test.image
-        test_targets = df_test.label
-        test_dataset = CoralFragDataset(image_names=test_image_names,
-                                        targets=test_targets,
-                                        classes=classes,
-                                        binary=self.is_binary,
-                                        root_dir=self.root_data_path,
+        test_dataset = CoralFragDataset(df=df_test,
+                                        data_dir=os.path.join(self.root_data_path, 'train'),
                                         train=False,
                                         resize=resize_to,
                                         augmentations=valid_aug)
@@ -211,26 +191,14 @@ class OneCycleModule(pl.LightningModule):
         df_train = df[df["kfold"] != self.fold_number].reset_index(drop=True)
         df_valid = df[df["kfold"] == self.fold_number].reset_index(drop=True)
 
-        train_image_names = df_train.image
-        val_image_names = df_valid.image
-
-        train_targets = df_train.label
-        val_targets = df_valid.label
-
-        train_dataset = CoralFragDataset(image_names=train_image_names,
-                                         targets=train_targets,
-                                         classes=classes,
-                                         binary=self.is_binary,
-                                         root_dir=self.root_data_path,
+        train_dataset = CoralFragDataset(df=df_train,
+                                         data_dir=os.path.join(self.root_data_path, 'train'),
                                          train=True,
                                          resize=resize_to,
                                          augmentations=train_aug)
 
-        val_dataset = CoralFragDataset(image_names=val_image_names,
-                                       targets=val_targets,
-                                       classes=classes,
-                                       binary=self.is_binary,
-                                       root_dir=self.root_data_path,
+        val_dataset = CoralFragDataset(df=df_valid,
+                                       data_dir=os.path.join(self.root_data_path, 'train'),
                                        train=True,
                                        resize=resize_to,
                                        augmentations=valid_aug)
@@ -238,6 +206,11 @@ class OneCycleModule(pl.LightningModule):
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.test_dataset = test_dataset
+
+        self.classes = sorted(df_train['label'].unique().tolist())
+        self.n_classes = len(self.classes)
+        self.n_outputs = self.n_classes
+        self.is_binary = self.n_outputs  <= 2
 
     def __dataloader(self, stage='train'):
         """Train/validation loaders."""
@@ -391,7 +364,6 @@ class OneCycleModule(pl.LightningModule):
         self.__log_confusion_matrices(conf_matrix.cpu().numpy().astype('int'), "Test")
 
         print(f"\nTest Epoch Loss: {loss:.4f}, test epoch accuracy: {acc:.4f}")
-        print(f"Confusion matrix: \n{conf_matrix.int()}")
 
         log = {
             'Test/epoch_loss': loss,

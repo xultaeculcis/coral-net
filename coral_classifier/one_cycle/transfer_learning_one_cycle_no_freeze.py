@@ -53,19 +53,8 @@ def add_model_specific_args(parent_parser):
                         metavar='W',
                         help='Number of CPU workers',
                         dest='num_workers')
-    parser.add_argument('--num-classes',
-                        default=37,
-                        type=int,
-                        help='Number of classes to classify',
-                        dest='n_classes')
-    parser.add_argument('--num-outputs',
-                        default=37,
-                        type=int,
-                        help='Number of outputs from the final classification layer - '
-                             'will determine if binary cross-entropy with logits or cross-entropy loss is used',
-                        dest='n_outputs')
     parser.add_argument('--folds',
-                        default=10,
+                        default=5,
                         type=int,
                         metavar='F',
                         help='Number of folds in k-Fold Cross Validation',
@@ -77,7 +66,7 @@ def add_model_specific_args(parent_parser):
                         help='Whether the BatchNorm layers should be trainable',
                         dest='train_bn')
     parser.add_argument('--epochs',
-                        default=10,
+                        default=20,
                         type=int,
                         dest='epochs',
                         help='For how many epochs the model should be trained')
@@ -87,7 +76,7 @@ def add_model_specific_args(parent_parser):
                         dest='seed',
                         help='The random seed for the reproducibility purposes')
     parser.add_argument('--max-lr',
-                        default=1e-3,
+                        default=5e-4,
                         type=float,
                         dest='max_lr',
                         help='The max learning rate for the 1Cycle LR Scheduler')
@@ -97,7 +86,7 @@ def add_model_specific_args(parent_parser):
                         dest='div_factor',
                         help='Determines the initial learning rate via initial_lr = max_lr/div_factor')
     parser.add_argument('--pct-start',
-                        default=.3,
+                        default=.2,
                         type=float,
                         dest='pct_start',
                         help='The percentage of the cycle (in number of steps) spent increasing the learning rate')
