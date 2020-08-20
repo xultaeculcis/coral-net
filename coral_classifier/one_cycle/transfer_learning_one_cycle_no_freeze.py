@@ -66,7 +66,7 @@ def add_model_specific_args(parent_parser):
                         help='Whether the BatchNorm layers should be trainable',
                         dest='train_bn')
     parser.add_argument('--epochs',
-                        default=20,
+                        default=5,
                         type=int,
                         dest='epochs',
                         help='For how many epochs the model should be trained')
@@ -76,7 +76,7 @@ def add_model_specific_args(parent_parser):
                         dest='seed',
                         help='The random seed for the reproducibility purposes')
     parser.add_argument('--max-lr',
-                        default=5e-4,
+                        default=1e-3,
                         type=float,
                         dest='max_lr',
                         help='The max learning rate for the 1Cycle LR Scheduler')
@@ -195,6 +195,7 @@ def main(arguments: argparse.Namespace) -> None:
             callbacks=[lr_logger],
             precision=arguments.precision,
             row_log_interval=10,
+            accumulate_grad_batches=1
             # fast_dev_run=True
         )
 

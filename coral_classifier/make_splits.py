@@ -79,7 +79,7 @@ def main(args: argparse.Namespace) -> None:
 def add_args(parent_parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(parents=[parent_parser])
     parser.add_argument('--data-dir',
-                        default='../datasets/train',
+                        default='../datasets/labeled',
                         type=str,
                         help='Path to the image folders',
                         dest='data_dir')
@@ -99,7 +99,7 @@ def add_args(parent_parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                         help='Number of splits for the k-fold cross validation',
                         dest='k')
     parser.add_argument('--test-size',
-                        default=.1,
+                        default=.2,
                         type=float,
                         help='Percent of the entire dataset that will be used to build the test set. '
                              'Only used if include-test flag is set tot True. 10% by default',
@@ -127,11 +127,11 @@ if __name__ == "__main__":
     arguments = get_args()
     all_classes = sorted(os.listdir(arguments.data_dir))
     classes = []
-    for c in all_classes:
-        if len(os.listdir(os.path.join(arguments.data_dir, c))) < 3000:
-            classes.append(c)
+    # for c in all_classes:
+    #     if len(os.listdir(os.path.join(arguments.data_dir, c))) < 3000:
+    #         classes.append(c)
 
-    arguments.classes = classes
+    arguments.classes = all_classes
     arguments.dirs = sorted([os.path.join(arguments.data_dir, c) for c in arguments.classes])
     main(arguments)
     print("Done")

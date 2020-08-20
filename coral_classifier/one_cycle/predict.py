@@ -1,15 +1,15 @@
 import glob
-import os
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Union, List
 
 import albumentations
 import numpy as np
+import pandas as pd
 import pytorch_lightning as pl
 import torch
-import pandas as pd
 from PIL import Image
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -22,9 +22,9 @@ std = (0.229, 0.224, 0.225)
 CONFIG = {
     'folds': 10,
     'checkpoint_store_path': '../../model-weights',
-    'batch_size': 48,
+    'batch_size': 128,
     'prediction_summary_files_path': '../predictions',
-    'unlabeled_data_dir': '../datasets/labeled'
+    'unlabeled_data_dir': '../../datasets/unlabeled'
 }
 device = 'cuda'
 
@@ -38,15 +38,45 @@ class UnlabeledDataset(Dataset):
         self.image_names = image_names
         self.resize = resize
         self.augmentations = augmentations
-        self.classes = sorted([
-            "Montipora",
-            "Other",
-            "Acropora",
-            "Zoa",
-            "Euphyllia",
-            "Chalice",
-            "Acanthastrea"
-        ])
+        self.classes = [
+            'Acanthastrea',
+            'Acanthophyllia & Cynarnia',
+            'Acropora',
+            'Alveopora & Goniopora',
+            'Blastomussa',
+            'Bubble Tip Anemone',
+            'Bubble coral',
+            'Candy cane coral',
+            'Carpet Anemone',
+            'Chalice',
+            'Cyphastrea',
+            'Discosoma Mushroom',
+            'Elegance coral',
+            'Euphyllia',
+            'Favia',
+            'Gorgonia',
+            'Leptastrea',
+            'Leptoseries',
+            'Lobophyllia & Trachyphyllia & Wellsophyllia',
+            'Maze Brain coral Platygyra',
+            'Mini Carpet Anemone',
+            'Montipora',
+            'Pavona',
+            'Plate coral Fungia',
+            'Porites',
+            'Psammacora',
+            'Rhodactis Mushroom',
+            'Ricordea Mushroom',
+            'Rock Flower Anemone',
+            'Scolymia',
+            'Scroll Corals Turbinaria',
+            'Star polyps',
+            'Styllopora & Pocillipora',
+            'Sun coral',
+            'Toadstool & Leather coral',
+            'Tridacna clams',
+            'Zoa'
+        ]
 
         self.class_lookup_by_name = dict([(c, i) for i, c in enumerate(self.classes)])
         self.class_lookup_by_index = dict([(i, c) for i, c in enumerate(self.classes)])
@@ -90,7 +120,7 @@ def main() -> None:
     already_processed = [folder.split('/')[-1].replace('.json', '') for folder in already_processed]
 
     for i, folder in enumerate(folders):
-        print("="*80)
+        print("=" * 80)
         print(f"Progress {i + 1}/{len(folders)}")
         if folder in already_processed:
             continue
@@ -99,7 +129,7 @@ def main() -> None:
     for csv in glob.glob(os.path.join(CONFIG['prediction_summary_files_path'], '*.csv')):
         _move_files(csv)
 
-    print("="*80)
+    print("=" * 80)
     print("DONE")
 
 
@@ -223,8 +253,8 @@ def _process_json(json_file_name: Union[Path, str], index_to_class_label_lookup:
 
 def _move_files(csv_file_path: Union[Path, str]):
     df = pd.read_csv(csv_file_path)
-    pretty_sure = df[df.avg_confidence > 0.95]
-    unsure = df[df.avg_confidence <= 0.95]
+    pretty_sure = df[df.avg_confidence >= 0.95]
+    unsure = df[df.avg_confidence < 0.95]
 
     folder = csv_file_path.split('/')[-1].replace('.csv', '')
     low_confidence = 'low_confidence'
@@ -244,6 +274,7 @@ def _move_files(csv_file_path: Union[Path, str]):
                              class_name if class_name is not None else row.predicted_class_label,
                              img_name)
             )
+
     # save high confidence images
     print(f'Moving high confidence images to new location for folder: {folder}')
     __move_images(pretty_sure)

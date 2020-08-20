@@ -183,7 +183,7 @@ class OneCycleModule(pl.LightningModule):
         )
 
         test_dataset = CoralFragDataset(df=df_test,
-                                        data_dir=os.path.join(self.root_data_path, 'train'),
+                                        data_dir=os.path.join(self.root_data_path, 'labeled'),
                                         train=False,
                                         resize=resize_to,
                                         augmentations=valid_aug)
@@ -192,13 +192,13 @@ class OneCycleModule(pl.LightningModule):
         df_valid = df[df["kfold"] == self.fold_number].reset_index(drop=True)
 
         train_dataset = CoralFragDataset(df=df_train,
-                                         data_dir=os.path.join(self.root_data_path, 'train'),
+                                         data_dir=os.path.join(self.root_data_path, 'labeled'),
                                          train=True,
                                          resize=resize_to,
                                          augmentations=train_aug)
 
         val_dataset = CoralFragDataset(df=df_valid,
-                                       data_dir=os.path.join(self.root_data_path, 'train'),
+                                       data_dir=os.path.join(self.root_data_path, 'labeled'),
                                        train=True,
                                        resize=resize_to,
                                        augmentations=valid_aug)
