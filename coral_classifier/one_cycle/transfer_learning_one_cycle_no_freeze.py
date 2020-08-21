@@ -54,7 +54,7 @@ def add_model_specific_args(parent_parser):
                         help='Number of CPU workers',
                         dest='num_workers')
     parser.add_argument('--folds',
-                        default=5,
+                        default=10,
                         type=int,
                         metavar='F',
                         help='Number of folds in k-Fold Cross Validation',
@@ -86,7 +86,7 @@ def add_model_specific_args(parent_parser):
                         dest='div_factor',
                         help='Determines the initial learning rate via initial_lr = max_lr/div_factor')
     parser.add_argument('--pct-start',
-                        default=.2,
+                        default=.1,
                         type=float,
                         dest='pct_start',
                         help='The percentage of the cycle (in number of steps) spent increasing the learning rate')
@@ -140,6 +140,11 @@ def add_model_specific_args(parent_parser):
                         type=int,
                         help='Train only on one specified fold',
                         dest='only_fold')
+    parser.add_argument('--accumulate-grad-batches',
+                        default=3,
+                        type=int,
+                        help='Accumulates grads every k batches',
+                        dest='accumulate_grad_batches')
     return parser
 
 

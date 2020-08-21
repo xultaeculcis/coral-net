@@ -94,12 +94,12 @@ def add_args(parent_parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                         help='Random seed for reproducibility. 42 by default.',
                         dest='seed')
     parser.add_argument('--k',
-                        default=5,
+                        default=10,
                         type=int,
                         help='Number of splits for the k-fold cross validation',
                         dest='k')
     parser.add_argument('--test-size',
-                        default=.2,
+                        default=.15,
                         type=float,
                         help='Percent of the entire dataset that will be used to build the test set. '
                              'Only used if include-test flag is set tot True. 10% by default',
