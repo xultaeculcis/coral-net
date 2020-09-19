@@ -237,7 +237,6 @@ fabric.properties
 # Project stuff
 ####################################datasets/
 logs/
-images/
 *.h5
 datasets/
 *.bin

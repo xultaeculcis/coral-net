@@ -25,5 +25,5 @@ def deduplicate(root_data_path):
 
 
 if __name__ == "__main__":
-    data_path = "../../datasets/train"
+    data_path = "../../datasets/intermediate-stage"
     deduplicate(data_path)

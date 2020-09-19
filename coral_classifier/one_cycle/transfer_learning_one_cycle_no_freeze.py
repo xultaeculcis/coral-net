@@ -31,7 +31,7 @@ def add_model_specific_args(parent_parser):
                         metavar='BK',
                         help='Name (as in ``torchvision.models``) of the feature extractor')
     parser.add_argument('--batch-size',
-                        default=128,
+                        default=256,
                         type=int,
                         metavar='B',
                         help='Batch size',
@@ -66,7 +66,7 @@ def add_model_specific_args(parent_parser):
                         help='Whether the BatchNorm layers should be trainable',
                         dest='train_bn')
     parser.add_argument('--epochs',
-                        default=5,
+                        default=10,
                         type=int,
                         dest='epochs',
                         help='For how many epochs the model should be trained')
@@ -86,7 +86,7 @@ def add_model_specific_args(parent_parser):
                         dest='div_factor',
                         help='Determines the initial learning rate via initial_lr = max_lr/div_factor')
     parser.add_argument('--pct-start',
-                        default=.1,
+                        default=.3,
                         type=float,
                         dest='pct_start',
                         help='The percentage of the cycle (in number of steps) spent increasing the learning rate')
@@ -141,7 +141,7 @@ def add_model_specific_args(parent_parser):
                         help='Train only on one specified fold',
                         dest='only_fold')
     parser.add_argument('--accumulate-grad-batches',
-                        default=3,
+                        default=1,
                         type=int,
                         help='Accumulates grads every k batches',
                         dest='accumulate_grad_batches')
@@ -200,6 +200,7 @@ def main(arguments: argparse.Namespace) -> None:
             callbacks=[lr_logger],
             precision=arguments.precision,
             row_log_interval=10,
+            # val_check_interval=0.5,
             accumulate_grad_batches=1
             # fast_dev_run=True
         )

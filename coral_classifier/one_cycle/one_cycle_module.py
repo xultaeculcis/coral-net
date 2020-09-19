@@ -110,7 +110,9 @@ class OneCycleModule(pl.LightningModule):
         y_hat = torch.argmax(y_logits, dim=1) if self.n_outputs > 1 else (y_logits >= 0.0).squeeze(1).long()
         num_correct = torch.eq(y_hat, y.view(-1)).sum()
 
-        return loss, num_correct
+        acc1, acc5 = self.__accuracy(y_logits, y, topk=(1, 5))
+
+        return loss, num_correct, acc1, acc5
 
     def __metrics_per_batch(self, batch):
         # 1. Forward pass:
@@ -128,6 +130,7 @@ class OneCycleModule(pl.LightningModule):
         rec = plm.recall(y_hat, y_true, num_classes=self.n_classes)
         f1 = plm.f1_score(y_hat, y_true, num_classes=self.n_classes)
         conf_matrix = plm.confusion_matrix(y_hat.long(), y_true.long())
+        acc1, acc5 = self.__accuracy(logits, y_true, topk=(1, 5))
 
         return (
             y_true,
@@ -139,7 +142,9 @@ class OneCycleModule(pl.LightningModule):
             prec,
             rec,
             f1,
-            conf_matrix
+            conf_matrix,
+            acc1,
+            acc5
         )
 
     def __log_confusion_matrices(self, conf_matrix, stage):
@@ -210,7 +215,7 @@ class OneCycleModule(pl.LightningModule):
         self.classes = sorted(df_train['label'].unique().tolist())
         self.n_classes = len(self.classes)
         self.n_outputs = self.n_classes
-        self.is_binary = self.n_outputs  <= 2
+        self.is_binary = self.n_outputs <= 2
 
     def __dataloader(self, stage='train'):
         """Train/validation loaders."""
@@ -259,11 +264,13 @@ class OneCycleModule(pl.LightningModule):
         return [opt], [scheduler]
 
     def training_step(self, batch, batch_idx):
-        train_loss, num_correct = self.__step(batch)
+        train_loss, num_correct, train_acc1, train_acc5 = self.__step(batch)
         train_acc = num_correct.float() / self.batch_size
         log = {
             'Train/loss': train_loss,
             'Train/acc': train_acc,
+            'Train/acc1': train_acc1,
+            'Train/acc5': train_acc5,
             'Train/num_correct': num_correct
         }
 
@@ -271,6 +278,8 @@ class OneCycleModule(pl.LightningModule):
             {
                 'loss': train_loss,
                 'train_acc': train_acc,
+                'train_acc1': train_acc1,
+                'train_acc5': train_acc5,
                 'num_correct': num_correct,
                 'log': log
             }
@@ -282,6 +291,8 @@ class OneCycleModule(pl.LightningModule):
         """Compute and log training loss and accuracy at the epoch level."""
 
         train_loss_mean = torch.stack([output['loss'] for output in outputs]).mean()
+        train_acc1_mean = torch.stack([output['acc1'] for output in outputs]).mean()
+        train_acc5_mean = torch.stack([output['acc5'] for output in outputs]).mean()
         train_acc_mean = torch.stack([output['num_correct'] for output in outputs]).sum().float()
         train_acc_mean /= (len(outputs) * self.batch_size)
 
@@ -289,6 +300,8 @@ class OneCycleModule(pl.LightningModule):
 
         log = {
             'Train/epoch/acc': train_acc_mean,
+            'Train/epoch/acc1': train_acc1_mean,
+            'Train/epoch/acc5': train_acc5_mean,
             'Train/epoch/loss': train_loss_mean,
             'step': self.current_epoch
         }
@@ -300,12 +313,15 @@ class OneCycleModule(pl.LightningModule):
         }
 
     def validation_step(self, batch, batch_idx):
-        y_true, y_hat, logits, loss, num_correct, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
+        y_true, y_hat, logits, loss, num_correct, acc, prec, rec, f1, conf_matrix, acc1, acc5 = self.__metrics_per_batch(
+            batch)
 
         return {
             'loss': loss,
             'num_correct': num_correct,
             'acc': acc,
+            'acc1': acc1,
+            'acc5': acc5,
             'precision': prec,
             'recall': rec,
             'f1_score': f1,
@@ -317,7 +333,8 @@ class OneCycleModule(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
         """Compute and log validation loss and accuracy at the epoch level."""
-        y_true, y_hat, loss, num_correct, acc, prec, rec, f1, conf_matrix = self.__metrics_per_epoch(outputs)
+        y_true, y_hat, loss, num_correct, acc, prec, rec, f1, conf_matrix, acc1, acc5 = self.__metrics_per_epoch(
+            outputs)
         self.__log_confusion_matrices(conf_matrix.cpu().numpy().astype('int'), "Validation")
 
         print(f"\nValidation Epoch Loss: {loss:.4f}, validation epoch accuracy: {acc:.4f}")
@@ -326,7 +343,8 @@ class OneCycleModule(pl.LightningModule):
             'Validation/loss/epoch': loss,
             'Validation/num_correct/epoch': num_correct,
             'Validation/acc/epoch': acc,
-            'step': self.current_epoch,
+            'Validation/acc1/epoch': acc1,
+            'Validation/acc5/epoch': acc5,
             'Validation/precision/epoch': prec,
             'Validation/recall/epoch': rec,
             'Validation/f1_score/epoch': f1,
@@ -340,12 +358,15 @@ class OneCycleModule(pl.LightningModule):
         }
 
     def test_step(self, batch, batch_idx):
-        y_true, y_hat, logits, loss, num_correct, acc, prec, rec, f1, conf_matrix = self.__metrics_per_batch(batch)
+        y_true, y_hat, logits, loss, num_correct, acc, prec, rec, f1, conf_matrix, acc1, acc5 = self.__metrics_per_batch(
+             batch)
 
         output = {
             'loss': loss,
             'num_correct': num_correct,
             'acc': acc,
+            'acc1': acc1,
+            'acc5': acc5,
             'precision': prec,
             'recall': rec,
             'f1_score': f1,
@@ -359,7 +380,8 @@ class OneCycleModule(pl.LightningModule):
 
     def test_epoch_end(self, outputs):
         """Compute and log test loss and accuracy at the epoch level."""
-        y_true, y_hat, loss, num_correct, acc, prec, rec, f1, conf_matrix = self.__metrics_per_epoch(outputs)
+        y_true, y_hat, loss, num_correct, acc, prec, rec, f1, conf_matrix, acc1, acc5 = self.__metrics_per_epoch(
+            outputs)
 
         self.__log_confusion_matrices(conf_matrix.cpu().numpy().astype('int'), "Test")
 
@@ -368,6 +390,8 @@ class OneCycleModule(pl.LightningModule):
         log = {
             'Test/epoch_loss': loss,
             'Test/epoch_acc': acc,
+            'Test/epoch_acc1': acc1,
+            'Test/epoch_acc5': acc5,
             'Test/epoch_precision': prec,
             'Test/epoch_recall': rec,
             'Test/epoch_f1_score': f1,
@@ -394,6 +418,23 @@ class OneCycleModule(pl.LightningModule):
         return self.test_loader
 
     @staticmethod
+    def __accuracy(output, target, topk=(1,)):
+        """Computes the accuracy over the k top predictions for the specified values of k"""
+        with torch.no_grad():
+            maxk = max(topk)
+            batch_size = target.size(0)
+
+            _, pred = output.topk(maxk, 1, True, True)
+            pred = pred.t()
+            correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+            res = []
+            for k in topk:
+                correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+                res.append(correct_k.mul_(100.0 / batch_size))
+            return res
+
+    @staticmethod
     def __metrics_per_epoch(outputs):
         num_correct = torch.stack([output['num_correct'] for output in outputs]).sum()
         loss_mean = torch.stack([output['loss'] for output in outputs]).mean()
@@ -403,6 +444,8 @@ class OneCycleModule(pl.LightningModule):
         f1_mean = torch.stack([output['f1_score'] for output in outputs]).mean()
         y_true = torch.cat([output['y_true'] for output in outputs], dim=-1)
         y_hat = torch.cat([output['y_hat'] for output in outputs], dim=-1)
+        acc1_mean = torch.stack([output['acc1'] for output in outputs]).mean()
+        acc5_mean = torch.stack([output['acc5'] for output in outputs]).mean()
 
         confusion_matrix = plm.confusion_matrix(y_hat, y_true)
 
@@ -415,5 +458,7 @@ class OneCycleModule(pl.LightningModule):
             prec_mean,
             rec_mean,
             f1_mean,
-            confusion_matrix
+            confusion_matrix,
+            acc1_mean,
+            acc5_mean
         )
