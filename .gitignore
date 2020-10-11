@@ -247,3 +247,4 @@ lightning_logs/
 cifar10/
 mnist/
 /coral_classifier/predictions/
+dask-worker-space/
