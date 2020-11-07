@@ -1,13 +1,15 @@
 from pathlib import Path
-from typing import Union
+from typing import Union, List
 
 import pandas as pd
 import numpy as np
 import os
-import glob
 import logging
 import re
+from glob import glob
 from tqdm import tqdm
+from pprint import pprint
+
 logging.basicConfig()
 logging.getLogger().setLevel(logging.INFO)
 
@@ -18,13 +20,13 @@ class LabelExtractor:
     label_column_name = "Target Label"
 
     def __init__(
-        self,
-        rename: bool = True,
-        move: bool = True,
-        output_path: Union[str, Path] = "../../datasets/csv"
+            self,
+            move: bool = True,
+            input_path: Union[str, Path] = "../../datasets/scrape",
+            output_path: Union[str, Path] = "../../datasets/csv"
     ) -> None:
-        self.rename = rename
         self.move = move
+        self.input_path = input_path
         self.output_path = output_path
         self.target_labels = {
             'acanthastrea': [
@@ -35,38 +37,61 @@ class LabelExtractor:
                 'bowerbanki',
                 'micromussa',
                 'acan',
+                'acans',
                 'candy cane aussie lord',
                 'lordhowensis'
             ],
-            'acanthophyllia': ['acanthophyllia'],
-            'acropora': ['acro', 'acrpopora', 'acropora', 'stag', 'millepora', 'milli', 'mille'],
-            'alveopora': ['alveopora'],
+            'acanthophyllia': ['acanthophyllia', 'acantophyllia'],
+            'acropora': [
+                'acro',
+                'acros',
+                'acrpopora',
+                'acropora',
+                'stag',
+                'millepora',
+                'milli',
+                'mille',
+                'efflo',
+                'soli',
+                'granulosa',
+                'green slimmer',
+                'tort',
+                'tenuis',
+                'tenius',
+                'slimer',
+                'strawberry shortcake',
+                'millie'
+            ],
+            'alveopora': ['alveopora', 'alve', 'alveopra'],
             'anacropora': ['anacropora'],
             'anthellia': ['anthellia', 'snowflake polyps'],
             'astreopora': ['astreopora'],
             'australophyllia': ['australophyllia', 'australophyllia wilsoni'],
-            'blastomussa': ['blastomussa', 'blasto', 'black cherry'],
+            'blastomussa': ['blastomussa', 'blasto', 'black cherry', 'blastos', 'merletti'],
             'bubble coral': ['bubble coral'],
-            'bubble tip anemone': ['bubble tip anemone', 'bta', 'bubble anemone', 'black widow anemone'],
-            'candy cane': ['candy cane', 'canes', 'cane'],
+            'bubble tip anemone': [
+                'bubble tip anemone',
+                'bubble tip',
+                'bta',
+                'bubble anemone',
+                'black widow anemone',
+                'dba hellfire',
+                'skittles anemone',
+                'rbt anemone',
+                'ultra wild rainbow',
+                'cc supernova',
+                'cc colorado sunburst',
+                'chicago sunburst',
+                'anemone bta',
+                'bubble anemones'
+            ],
+            'candy cane': ['candy cane', 'canes', 'cane', 'candycane'],
             'carpet anemone': ['carpet anemone'],
             'cespitularia': ['cespitularia'],
-            'chalice': ['chalice', 'mycedium', 'echinopora'],
+            'chalice': ['chalice', 'chalices', 'mycedium', 'echinopora', 'echinophyllia'],
             'clove polyps': ['clove polyps', 'clove polyp', 'daisy polyp', 'daisy polyps'],
             'condylactis anemone': ['condylactis anemone'],
-            'tridacna clam': [
-                'clam',
-                'tridacna',
-                'maxima',
-                'derasa',
-                'tevoroa',
-                'gigas',
-                'mbalavuana',
-                'squamosina',
-                'crocea',
-                'squamosa'
-            ],
-            'cynarina': ['cynarina'],
+            'cynarina': ['cynarina', 'cynarinia'],
             'cyphastrea': ['cyphastrea'],
             'diaseris': ['diaseris', 'razor coral', 'fragilis'],
             'duncan': ['duncan', 'duncans', 'elegance'],
@@ -74,14 +99,23 @@ class LabelExtractor:
             'euphyllia frogspawn': ['frogspawn', 'hammered frog'],
             'euphyllia hammer': ['hammer'],
             'euphyllia torch': ['torch'],
-            'favia': ['favia', 'faviidae'],
+            'favia': ['favia', 'faviidae', 'favias', 'barabattoia amicorum'],
             'favites': ['favites', 'war coral'],
             'galaxea': ['galaxea'],
             'goniastrea': ['goniastrea'],
-            'goniopora': ['goniopora', 'gonio', 'goni'],
-            'gorgonia': ['gorgonia'],
+            'goniopora': ['goniopora', 'gonio', 'goni', 'gonipora', 'flowerpot coral', 'goniapora'],
+            'gorgonia': ['gorgonia', 'carnation coral', 'gorgonian', 'telesto', 'sea fan'],
             'hydnophora': ['hydnophora', 'hydno'],
-            'leather coral': ['leather coral', 'leather', 'toadstool', 'lobophytum'],
+            'leather coral': [
+                'leather coral',
+                'leather',
+                'toadstool',
+                'lobophytum',
+                'capnella',
+                'kenya tree',
+                'sinularia'
+            ]
+            ,
             'leptastrea': ['leptastrea', 'lepta'],
             'leptoseris': ['leptoseris', 'lepto'],
             'lithophyllon': ['lithophyllon'],
@@ -91,6 +125,7 @@ class LabelExtractor:
             'montipora': [
                 'montipora',
                 'monti',
+                'montis',
                 'cap',
                 'undata',
                 'hispida',
@@ -99,23 +134,23 @@ class LabelExtractor:
                 'aequituberculata',
                 'spongodes'
             ],
-            'montipora digitata': ['digitata'],
-            'mushroom': ['mushroom', 'shroom'],
+            'montipora digitata': ['digitata', 'digi', 'forest fire'],
+            'mushroom': ['mushroom', 'shroom', 'mushrooms'],
             'mushroom bounce': ['bounce'],
-            'mushroom discosoma': ['discosoma', 'disco mushroom'],
+            'mushroom discosoma': ['discosoma', 'disco mushroom', 'disco', 'discos'],
             'mushroom rhodactis': ['rhodactis', 'rhodactus', 'st thomas'],
-            'mushroom ricordea': ['ricordea', 'ricodea', 'yuma', 'florida'],
+            'mushroom ricordea': ['ricordea', 'ricodea', 'yuma', 'florida', 'yumma'],
             'oulophyllia': ['oulophyllia'],
             'pachyseris': ['pachyseris'],
             'pavona': ['pavona', 'cactus'],
             'pectinia': ['pectinia'],
             'pipe organ': ['pipe organ'],
             'plate coral fungia': ['plate coral', 'fungia', 'cycloseris'],
-            'platygyra': ['platygyra', 'platy', 'platgyra', 'brain coral'],
+            'platygyra': ['platygyra', 'platy', 'platgyra', 'brain coral', 'maze brain coral'],
             'plesiastrea': ['plesiastrea'],
             'pocillopora': ['pocillopora'],
             'porites': ['porites'],
-            'psammocora': ['psammocora', 'psammy', 'psammacora'],
+            'psammocora': ['psammocora', 'psammy', 'psammacora', 'psamacora', 'pscammacora'],
             'rock flower anemone': [
                 'rock anemone',
                 'flower anemone',
@@ -128,11 +163,23 @@ class LabelExtractor:
             'seriatopora': ['seriatopora', 'bridsnest', 'birdsnest', 'birds nest', 'birdnest'],
             'star polyps': ['star polyps', 'star polyp'],
             'stylocoeniella': ['stylocoeniella'],
-            'stylophora': ['stylophora', 'stylo'],
-            'sun coral': ['sun coral'],
+            'stylophora': ['stylophora', 'stylo', 'ora purple stylo'],
+            'sun coral': ['sun coral', 'dendrophyllia'],
             'sympodium': ['sympodium'],
             'symphyllia': ['symphyllia', 'symphyllia wilsoni', 'smphyllia'],
             'trachyphyllia': ['trachyphyllia'],
+            'tridacna clam': [
+                'clam',
+                'tridacna',
+                'maxima',
+                'derasa',
+                'tevoroa',
+                'gigas',
+                'mbalavuana',
+                'squamosina',
+                'crocea',
+                'squamosa'
+            ],
             'tube anemone': ['tube anemone'],
             'turbinaria': ['turbinaria', 'scroll'],
             'wellsophyllia': ['wellsophyllia'],
@@ -151,29 +198,636 @@ class LabelExtractor:
                 'palythoa',
                 'palythoas',
                 'bam bams',
-                'dragon eyes'
+                'dragon eyes',
+                'dragon eye',
+                'red people eaters',
+                'north star'
             ]
         }
+        self.shopify_skippable_collections_and_categories = [
+            '*in-store pet supplies',
+            'accessories',
+            'acrylic bird cage',
+            'acrylic bird cages',
+            'additives',
+            'additives & supplements',
+            'additives & treatments',
+            'additives, conditioners & treatments',
+            'air pump',
+            'air pump & accessories',
+            'air pump accessories',
+            'air pumps & accessories',
+            'air purifiers',
+            'algae',
+            'algae remover',
+            'algae removers',
+            'algagen',
+            'algarde',
+            'all dry goods',
+            'all in-stock',
+            'american marine',
+            'angel fish',
+            'angelfish',
+            'angels',
+            'anthias',
+            'apex',
+            'apex ghl',
+            'apparel',
+            'aqua excel calcium reactors',
+            'aqua illumination',
+            'aqua illumination lights ai leds',
+            'aqua medic',
+            'aqua one',
+            'aqua one led',
+            'aqua ultraviolet uv sterilizers',
+            'aquaforest',
+            'aquafx',
+            'aquafx ro/di reverse osmosis units',
+            'aquaillumination',
+            'aquamaxx calcium reactors',
+            'aquamaxx cone & cones protein skimmers',
+            'aquamaxx cone q-series protein skimmers',
+            'aquamaxx dc pumps',
+            'aquamaxx hang-on protein skimmers',
+            'aquarium algae treatment',
+            'aquarium dosers',
+            'aquarium maintenance',
+            'aquarium monitor',
+            'aquarium multi-functional detachable isolation boxes shroom box breeding box '
+            'quarantine box.',
+            'aquarium nitrate reactors',
+            'aquarium reactor media',
+            "aquarium reef lighting fixtures & powerheads - led's, t5's, & more",
+            'aquarium salt',
+            'aquarium setup - full aquarium setups ( fish tanks, stands, & sumps)',
+            'aquarium systems',
+            'aquarium tanks & cabinets',
+            'aquarium temperature thermometer',
+            'aquariums',
+            'aquariums & accesories',
+            'aquascaping',
+            'aquascaping & decorations',
+            'aquatic life',
+            'arcadia',
+            'art',
+            'artwork',
+            'ati scratch & dent',
+            'ati straton',
+            'ati-aquaristik',
+            'ato',
+            'ato reservoir',
+            'ato units',
+            'auction',
+            'auction items',
+            'august coral flash sale',
+            'auto aqua',
+            'auto feeder',
+            'auto top off ato units',
+            'auto top up',
+            'auto top up & dosing pump equipments',
+            'auto top-up',
+            'back to school r2r uc livesale! aug 22 & 23, both days 10am-6pm pst',
+            'bacteria',
+            'bacteria products',
+            'bandit angel',
+            'banggai cardinals',
+            'basslets',
+            'basslets / grammas',
+            'battery',
+            'battleboxes',
+            'battlechaeto',
+            'betta',
+            'bio media',
+            'bio-viv garlic',
+            'biopellet and media reactor',
+            'biopellet reactor',
+            'biopellet reactor media',
+            'biotek marine biopellet reactors',
+            'biotek marine media reactors',
+            'biotek marine sumps',
+            'black tang',
+            'blennies',
+            'blennys',
+            'blood shrimp',
+            'blue life',
+            'book',
+            'books',
+            'boyd enterprises',
+            'brands',
+            'bubble magus',
+            'bubble magus biopellet reactors',
+            'bubble magus calcium reactors',
+            'bubble magus protein skimmers',
+            'bubble reducer',
+            'build your own frag pack!',
+            'bulkhead',
+            'butterfly fish',
+            'butterflyfish',
+            'ca plus',
+            'cabinet',
+            'cad lights biopellet reactors',
+            'calcium',
+            'calcium powder',
+            'calcium reactor',
+            'calcium reactor media',
+            'calcium reactors',
+            'camera',
+            'carbo ex',
+            'cardinalfish',
+            'cardinals',
+            'ceramic frag rock',
+            'cheato',
+            'cheato gro',
+            'chiller',
+            'chiller hose',
+            'chillers',
+            'chillers & heaters',
+            'chromis',
+            'clean up crew',
+            'cleaning & maintenance',
+            'cleanup',
+            'clearance',
+            'clothing',
+            'clown fish',
+            'clownfish',
+            'clowns',
+            'co1',
+            'co2 accessories',
+            'co2 calcium reactor solenoid',
+            'co2 system',
+            'coco worm',
+            'components strong',
+            'computer controllers',
+            'conditioner',
+            'continuum',
+            'control and monitoring',
+            'controller',
+            'controllers & testings',
+            'cooling & heating',
+            'coral & fish food',
+            'coral dip treatment',
+            'coral essentials',
+            'coral food',
+            'coral magazine',
+            'coral medication',
+            'coral propagation',
+            'coralline algae',
+            'cowrie snails',
+            'crab',
+            'crabs',
+            'crispa',
+            'crossflow',
+            'current usa led lighting',
+            'custom',
+            'custom bundle',
+            'cyano bacteria treatment',
+            'dallas',
+            'damselfish',
+            'dartfish',
+            'dastaco',
+            'dc pump',
+            'dc return pump',
+            'dd jumpguard',
+            'decor & ornaments',
+            'decoration',
+            'deltec',
+            'di canister funnel tool',
+            'dino identification',
+            'dinoflagellate treatment remover',
+            'diy tankguard flexible cut out',
+            'diy tankguard multi cut out',
+            'done container',
+            'dose line holder',
+            'dose pump package',
+            'dose pump package 2',
+            'dose pumps',
+            'doser',
+            'dosing & auto top-off',
+            'dosing pump',
+            'dosing pumps',
+            'dottybacks',
+            'doughnut',
+            "dr. mac's stash",
+            'dragonets',
+            'dragons tongue',
+            'dry foods',
+            'dry good',
+            'dry goods',
+            'drygoods',
+            'dsr',
+            'ecotech',
+            'ecotech controller holder',
+            'ecotech marine pumps & wavemakers',
+            'ecotech radion lights',
+            'eels',
+            'eheim',
+            'ekoral',
+            'electrical equipment',
+            'electronic ballast',
+            'enaly ozone generators',
+            'eshopps',
+            'eshopps protein skimmers',
+            'feather dusters',
+            'featured',
+            'featured products',
+            'feeding tool',
+            'feeding tools & food timers',
+            'filefish',
+            'filter',
+            'filter accessories',
+            'filter media',
+            'filter media & socks',
+            'filter socks',
+            'filters',
+            'filters & accessories',
+            'filters & media',
+            'filtration',
+            'filtration media',
+            'finger leather',
+            'finnex heaters',
+            'first bite',
+            'fish',
+            'fish & coral foods',
+            'fish & inverts',
+            'fish and coral food',
+            'fish feeder',
+            'fish food',
+            'fish ich medication',
+            'fish medication',
+            'fish nets',
+            'fish trap',
+            'flag tail combo',
+            'flame angel',
+            'flatworm control',
+            'flatworm remover',
+            'flea & parasite control',
+            'fleece filters',
+            'flex sump',
+            'flipper',
+            'flipper cleaner',
+            'flowerpots',
+            'food',
+            'food & supplements',
+            'food & treats',
+            'food + more',
+            'foods',
+            'forcels',
+            'foxface & rabbitfish',
+            'foxface/rabbit',
+            'fraction',
+            'frag plug',
+            'frag plugs',
+            'frag plugs & disk',
+            'frag rack',
+            'frag supplies',
+            'fragging equipment',
+            'fragging supplies',
+            'fragging tools',
+            'fresh & saltwater aquarium invertebrates',
+            'freshwater aquarium fish - tetras, goldfish, cichlids, & more',
+            'freshwater fish',
+            'freshwater livestock @ 28 june 2020',
+            'freshwater plant',
+            'freshwater plants',
+            'front page',
+            'frontpage',
+            'full store',
+            'gear',
+            'general',
+            'giant betta',
+            'giesemann',
+            'gift',
+            'gift card',
+            'gift cards',
+            'glass cleaners',
+            'glue',
+            'glue, epoxy & silicone',
+            'gobies',
+            'goods',
+            'green goblin',
+            'gsp',
+            'halfmoon',
+            'hamilton cebu sun systems',
+            'hamilton technology reflector pendants',
+            'hamlet',
+            'hardware',
+            'hawkfish',
+            'heat packs',
+            'heater',
+            'heaters',
+            'heaters & chillers',
+            'heaters & thermometers',
+            'heating/cooling',
+            'help',
+            'hermit crab',
+            'hermit crabs',
+            'hmpk',
+            'hose',
+            'hoses and plumbing',
+            'hydrometer',
+            'illumagic',
+            'in sump protein skimmer',
+            'innovative marine (clearance sales)',
+            'interpet',
+            'invert',
+            'invert kit',
+            'invert kits',
+            'invertebrate',
+            'invertebrates',
+            'inverts',
+            'inverts & cuc',
+            'inverts / cuc',
+            'iodine',
+            'iphone camera filter',
+            'iton',
+            'jawfish',
+            'jbl',
+            'jebao',
+            'jebao pump',
+            'jecod',
+            'jns',
+            'kalkwasser',
+            'kessil',
+            'kessil lights',
+            'kh guardian dr. bridge controllers',
+            'khg',
+            'korallen-zucht',
+            'korallin calcium reactors',
+            'latezonatus clowns',
+            'led',
+            'led light',
+            'led lighting',
+            'led refugium lighting',
+            'led t5 lighting',
+            'lifegard aquatics temp alert',
+            'lifegard aquatics uv sterilizers',
+            'light',
+            'light accessories',
+            'light bulbs',
+            'light fixtures',
+            'light fixtures & accessories',
+            'lighting',
+            'lighting & bulbs',
+            'lionfish',
+            'live cultured food',
+            'live food',
+            'live rock',
+            'live rock & dry rock',
+            'livesale shipping modules',
+            'lobster',
+            'macro',
+            'macro algae',
+            'macro algaes',
+            'macroalgae',
+            'macroalgae - saltwater plants for nutrient export in the home aquarium',
+            'magnesium granulate media',
+            'magnetic algae cleaner',
+            'magnetic aquarium algae cleaners',
+            'magnetic ballast',
+            'maintenance',
+            'maintenance tools',
+            'mandarin',
+            'mantis',
+            'marine & freshwater aquarium chillers - control your water temperature for '
+            'your aquarium inhabitants',
+            'marine betta',
+            'marine fish',
+            'marine invert',
+            'marine salt',
+            'marine shipment @ 25 september 2020',
+            'maxspect',
+            'maxspect razor recurve led lighting',
+            'maxspect razor x led lighting',
+            'measuring & monitoring',
+            'media',
+            'media reactor',
+            'medication',
+            'medication & water treatments',
+            'medication/ pest control',
+            'medicine & pest control',
+            'membership',
+            'merch',
+            'merchandise / artwork',
+            'metal halide lighting',
+            'meters & controllers',
+            'misc collectibles',
+            'misc dry goods',
+            'miscellaneous',
+            'mist maker',
+            'misting',
+            'mixed frag pack',
+            'mode protein skimmers',
+            'mode refugiums & sumps',
+            'monitors & controllers',
+            'nano-tech bio blocks',
+            'nem',
+            'neptune systems',
+            'nero 5',
+            'new aquamaxx fc series skimmers',
+            'newa',
+            'nf',
+            'nitrate reactor',
+            'nitrate reactors',
+            'no no3',
+            'not drygoods',
+            'nps',
+            'nt labs',
+            'nudibranch',
+            'nugget cart collection',
+            'nugget_giftcard',
+            'nyos',
+            'nyos protein skimmers',
+            'ocean nutrition',
+            'of',
+            'orp',
+            'orphek atlantik',
+            'other fish & aquarium supplies',
+            'other hardware',
+            'other products',
+            'overflow',
+            'overflow box',
+            'ozone generator',
+            'ozonizer',
+            'pacific sun',
+            'pack',
+            'painted crayfish',
+            'par sensor',
+            'phytoplankton',
+            'pipe',
+            'pipes, valves & fittings',
+            'plant fertilisation',
+            'plasma lighters',
+            'plumbing',
+            'potassium',
+            'pouch feeder',
+            'pre-order',
+            'premium member deal',
+            'premium member discounted products',
+            'premium members only',
+            'prime',
+            'pro clear red flex 4 in 1 sumps',
+            'pro clear red flex reef sumps',
+            'pro clear systems wet/dry filters',
+            'products',
+            'protein skimmer',
+            'protein skimmers',
+            'protein skimmers | aquarium controllers | media reactors',
+            'pseudochromis aldabraensis',
+            'pufffer fish',
+            'pump',
+            'pumps',
+            'pumps & parts',
+            'pumps & powerheads',
+            'pumps (water)',
+            'pumps and wavewakers',
+            'rabbitfish',
+            'rare fish',
+            'reaching tool',
+            'reactor feed pumps',
+            'reactors',
+            'red reef lobster',
+            'red sea',
+            'red sea max series',
+            'red sea protein skimmers',
+            'red sea reef care',
+            'red slipper',
+            'reef apparel',
+            'reef octopus biopellet reactors',
+            'reef octopus calcium reactors',
+            'reef octopus classic protein skimmers',
+            'reef octopus elite protein skimmers',
+            'reef octopus external protein skimmers',
+            'reef octopus hang on protein skimmers',
+            'reef octopus regal protein skimmers',
+            'reef revolution',
+            'reef secrets',
+            'reef secrets brand',
+            'reef stuff',
+            'reef2land15',
+            'reefshack collections - exclusive reefshack products & dry goods coral '
+            'transport carriers | aquarium controller holders',
+            'reflector pendant',
+            'refractometer',
+            'refractometers',
+            'refugiums and sumps',
+            'return pump',
+            'reverse osmosis',
+            'reverse osmosis (ro/di)',
+            'rigid airline',
+            'ro membrane',
+            'ro unit accessories',
+            'ro units & accessories',
+            'ro/di',
+            'ro/di unit',
+            'rock',
+            'rocks',
+            'rossmont',
+            'rowa carbon',
+            'rowa phos',
+            'running auctions',
+            'sale',
+            'salifert',
+            'salt',
+            'salt, sand & rock',
+            'salts',
+            'saltwater',
+            'saltwater aquarium fish - designer clownfish, tangs, & more',
+            'saltwater fish',
+            'sand sifting starfish',
+            'sapphire blue trigger sumps',
+            'scalpel',
+            'scissor',
+            'scratch/dent',
+            'sea hare',
+            'sea horses',
+            'seachem',
+            'seahorse & pipefish',
+            'seahorses',
+            'sealant',
+            'seneye reef',
+            'sexy shrimp',
+            'shipping unit',
+            'shirts',
+            'shrimp',
+            'shrimp prawn',
+            'shrimp related',
+            'simplicity protein skimmers',
+            'skimmer',
+            'skimmer stand',
+            'skimmers',
+            'skull',
+            'small feed water pump',
+            'smart ato controller',
+            'snail',
+            'star fish',
+            'starfish',
+            'strontium',
+            'subscription',
+            'substrate',
+            'sump',
+            'supplement',
+            'supplements',
+            'supplies',
+            'swag',
+            't shirt',
+            't-shirts',
+            't5 lighting',
+            'tangs',
+            'tangs / surgeonfish',
+            'tank',
+            'tank accessories',
+            'tank bred marine fish',
+            'tank cleaning',
+            'tank covers',
+            'tankraised',
+            'tanks',
+            'temperature',
+            'terrarium',
+            'test kit',
+            'test kits',
+            'test reagents',
+            'testing, measuring & monitoring',
+            'thermometer',
+            'thieling',
+            'tiger shrimp',
+            'titanium aquarium heater',
+            'tjm',
+            'tmc / v2',
+            'tool',
+            'trident',
+            'trigger amethyst purple sumps',
+            'trigger crystal clear sumps',
+            'trigger emerald green sumps',
+            'trigger ruby red sumps',
+            'trigger systems platinum sumps',
+            'trigger triton method sumps',
+            'triggerfish',
+            'triggerfish / file fish',
+            'trochus snail',
+            'tunze',
+            'turbo snails',
+            'tweezers',
+            'urchins',
+            'uv',
+            'uv lamp',
+            'uv sterilisers',
+            'uv sterilizer',
+            'virtual tank 3',
+            'water pump',
+            'water treatment',
+            'wave pump',
+            'wavemaker',
+            'wavemakers & circulation pumps',
+            'wet/dry filter',
+            'wilsoni',
+            'wrasse',
+            'zeo reactor',
+            'zeovit reactor',
+            'zeovit reactor media',
+        ]
 
-    def as_shopify(self, frame: pd.DataFrame, column_name: str) -> pd.DataFrame:
-        logging.info("Data comes from Shopify site")
-        return self._extract_target_label(frame, column_name)
-
-    def as_woocommerce(self, frame: pd.DataFrame, column_name: str) -> pd.DataFrame:
-        logging.info("Data comes from Woocommerce site")
-        return self._extract_target_label(frame, column_name)
-
-    def assign_classes(self, frame: pd.DataFrame) -> pd.DataFrame:
-        logging.info(f"File contains {len(frame)} products")
-
-        if "Collection" in frame.columns:
-            frame = self.as_shopify(frame, "Name")
-        else:
-            frame = self.as_woocommerce(frame, "product_name")
-
-        return frame
-
-    def _extract_target_label(self, frame: pd.DataFrame, column_name: str) -> pd.DataFrame:
+    def _extract_target_label(self, frame: pd.DataFrame) -> pd.DataFrame:
+        column_names = ["Name", "Collection"]
         possible_duplicate_labels = [
             'acropora',
             'mushroom',
@@ -182,49 +836,95 @@ class LabelExtractor:
             'montipora',
             'lobophyllia',
             'candy cane',
+            'carpet anemone',
+            'christmas tree worm coral',
+            'mushroom discosoma',
+            'favia',
+            'chalice',
+            'platygyra'
         ]
-
         frame_cpy = frame.copy()
-        frame_cpy[self.label_column_name] = "unknown"
-
-        # for each product in df
+        frame_cpy["Target Label"] = "unknown"
+        frame_cpy["Target Label Count"] = -1
         for i, row in tqdm(frame.iterrows(), total=len(frame)):
             possible_labels = set()
-
-            # loop over possible keywords in each target label and assign
-            # possible label to this product
             for label in self.target_labels.keys():
                 for key_word in self.target_labels[label]:
-                    if re.search(r"(\b" + f"{key_word}" + r"\b)", row[column_name].lower()):
-                        possible_labels.add(label)
+                    for col_name in column_names:
+                        if re.search(r"(\b" + f"{key_word}" + r"\b)", row[col_name].lower()):
+                            possible_labels.add(label)
 
-            # if only one label was assigned then we can finish
             if len(possible_labels) == 1:
-                frame_cpy.at[i, self.label_column_name] = list(possible_labels)[0]
-
-            # if not then we need to decide which label to remove
+                frame_cpy.at[i, "Target Label"] = list(possible_labels)[0]
             else:
                 for label in possible_duplicate_labels:
                     if label not in possible_labels:
                         continue
-
                     possible_labels.remove(label)
-                    if len(possible_labels) > 1:
-                        logging.warning(f"Over 2 labels for product {(i, row[column_name])}")
-                    frame_cpy.at[i, self.label_column_name] = list(possible_labels)[0]
-
+                    frame_cpy.at[i, "Target Label"] = list(possible_labels)[0] if len(
+                        possible_labels) > 0 else 'unknown'
+                    break
         return frame_cpy
+
+    def _handle_shopify(self, dfs: List[pd.DataFrame]) -> pd.DataFrame:
+        # ----------------
+        # Handle Shopify
+        # ----------------
+        shopify_dfs = [df for df in dfs if "Collection" in df.columns]
+        logging.info(f"Total of {len(shopify_dfs)} CSV files from Shopify sites will be merged")
+        df = pd.concat(shopify_dfs)
+
+        def _skippable(row: pd.Series) -> int:
+            collection = row["Collection"]
+            category = row["Category"]
+
+            if isinstance(collection, float) or isinstance(category, float):
+                return 0
+
+            if collection.lower() in self.shopify_skippable_collections_and_categories or \
+                    category.lower() in self.shopify_skippable_collections_and_categories:
+                return 1
+
+            return 0
+
+        df["skippable"] = df.apply(lambda row: _skippable(row), axis=1)
+
+        skippable_df = df[df["skippable"] == 1]
+        skippable_df["Target Label"] = "skippable"
+        unskippable_df = df[df["skippable"] == 0]
+        unskippable_df = self._extract_target_label(unskippable_df)
+        df = pd.concat([skippable_df, unskippable_df])
+        return df
+
+    def _handle_woocommerce(self, dfs: List[pd.DataFrame]) -> pd.DataFrame:
+        # ----------------
+        # Handle Shopify
+        # ----------------
+        woocommerce_dfs = [df for df in dfs if "Collection" not in df.columns]
+        logging.info(f"Total of {len(woocommerce_dfs)} CSV files from Woocommerce sites will be merged")
+        df = pd.concat(woocommerce_dfs)
+
+        print(len(df))
+
+        return df
+
+    def assign_classes(self):
+        csv_files = sorted(glob(os.path.join(data_dir, "*.csv")))
+        logging.info(f"Found {len(csv_files)} files to process: {csv_files}")
+        dfs = [pd.read_csv(f) for f in csv_files]
+
+        # extract labels
+        # shopify_results = self._handle_shopify(dfs)
+        woocommerce_results = self._handle_woocommerce(dfs)
+
+        # save
+        # shopify_results.to_csv(os.path.join(self.output_path, "shopify.csv"), index=False, header=True)
+        # woocommerce_results.to_csv(os.path.join(self.output_path, "woocommerce.csv"), index=False, header=True)
+
+        return woocommerce_results
 
 
 if __name__ == "__main__":
     logging.info("Running class assignment script")
-    csv_files = sorted(glob.glob(os.path.join(data_dir, "*.csv")))
-    logging.info(f"Found {len(csv_files)} files to process: {csv_files}")
-
-    csv = "../../datasets/scrape/worldwidecorals.com.csv"
-
-    logging.info(f"Loading file {csv}")
-
-    df = pd.read_csv(csv)
     lex = LabelExtractor()
-    df = lex.assign_classes(df)
+    df = lex.assign_classes()
